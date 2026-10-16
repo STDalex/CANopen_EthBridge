@@ -16,7 +16,7 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define LCD_WIDTH              480U
 #define LCD_HEIGHT             272U
 #define LCD_FRAMEBUFFER        0xC0000000UL
-#define CAN_SNIFFER_VERSION    "2.5.5"
+#define CAN_SNIFFER_VERSION    "2.6.0"
 #define UI_DRAW_LINES          24U
 #define UI_VISIBLE_ROWS        12U
 #define UI_HISTORY_LENGTH      256U
@@ -152,6 +152,8 @@ static lv_obj_t *node_events_table_body;
 static lv_obj_t *node_events_spacer;
 static lv_obj_t *node_events_pause_label;
 static lv_obj_t *node_events_mode_label;
+static lv_obj_t *node_events_type_header_label;
+static lv_obj_t *nodes_response_header_label;
 static lv_obj_t *event_cell_labels[UI_EVENT_VISIBLE_ROWS][7];
 static UiEventRowText event_row_text[UI_EVENT_VISIBLE_ROWS];
 static CanopenNodeEventSnapshot event_snapshot[CANOPEN_EVENT_SNAPSHOT_MAX];
@@ -165,16 +167,18 @@ static bool node_object_mode;
 static lv_obj_t *info_description_label;
 static lv_obj_t *bitrate_selector_label;
 static lv_obj_t *bitrate_options_panel;
+static lv_obj_t *deep_sdo_button_label;
+static bool deep_sdo_mode;
 
 static const char info_monitor_text[] =
   "Монитор: все принятые CAN-кадры с временем, ID, форматом, DLC и данными. "
   "Пауза останавливает таблицу, но прием продолжается.";
 static const char info_nodes_text[] =
-  "Ноды: список уникальных CANopen-нод, доля трафика и процент ответов SDO. "
-  "Стрелка открывает пакеты выбранной ноды.";
+  "Ноды: список уникальных CANopen-нод и доля трафика. В базовом режиме показан "
+  "процент ответов SDO, в глубоком - процент успешно завершенных операций.";
 static const char info_objects_text[] =
   "Объекты: уникальные пары SDO object/subindex. Запрос расположен перед ответом; "
-  "время, данные и задержка обновляются в строке.";
+  "глубокий режим показывает WAIT, OK, ABORT, TIME, AMB, ERR и ORPH без новых колонок.";
 static const char info_bitrate_text[] =
   "Скорость: Auto перебирает поддерживаемые скорости. Ручной режим фиксирует "
   "выбранное значение. CAN работает только на прием.";
@@ -265,6 +269,24 @@ static void Bitrate_OptionClicked(lv_event_t *event)
   }
   lv_obj_set_hidden(bitrate_options_panel, true);
   lv_obj_invalidate(settings_screen);
+}
+
+static void DeepSdo_ModeClicked(lv_event_t *event)
+{
+  (void)event;
+  deep_sdo_mode = !deep_sdo_mode;
+  lv_label_set_text(deep_sdo_button_label, deep_sdo_mode ? "[X] Deep" : "[ ] Basic");
+  lv_label_set_text(nodes_response_header_label, deep_sdo_mode ? "OK %" : "SDO %");
+  lv_label_set_text(node_events_type_header_label,
+                    (deep_sdo_mode && node_object_mode) ? "State" : "Type");
+  if (lv_screen_active() == nodes_screen)
+  {
+    Refresh_NodesSnapshot();
+  }
+  else if ((lv_screen_active() == node_events_screen) && (selected_node_id != 0U))
+  {
+    Refresh_NodeEventsSnapshot();
+  }
 }
 
 static void Reset_StatisticsClicked(lv_event_t *event)
@@ -585,7 +607,20 @@ static int32_t Compare_Nodes(const CanopenNodeSnapshot *left,
                ((left->frame_count < right->frame_count) ? -1 : 0);
       break;
     case NODE_SORT_RESPONSE:
-      if ((left->sdo_request_count == 0U) && (right->sdo_request_count == 0U))
+      if (deep_sdo_mode)
+      {
+        uint32_t left_finished = left->sdo_completed_count + left->sdo_aborted_count +
+                                 left->sdo_timeout_count + left->sdo_protocol_error_count;
+        uint32_t right_finished = right->sdo_completed_count + right->sdo_aborted_count +
+                                  right->sdo_timeout_count + right->sdo_protocol_error_count;
+        uint64_t left_ratio = (uint64_t)left->sdo_completed_count * right_finished;
+        uint64_t right_ratio = (uint64_t)right->sdo_completed_count * left_finished;
+        if ((left_finished == 0U) && (right_finished == 0U)) result = 0;
+        else if (left_finished == 0U) result = -1;
+        else if (right_finished == 0U) result = 1;
+        else result = (left_ratio > right_ratio) ? 1 : ((left_ratio < right_ratio) ? -1 : 0);
+      }
+      else if ((left->sdo_request_count == 0U) && (right->sdo_request_count == 0U))
       {
         result = 0;
       }
@@ -653,14 +688,31 @@ static void Format_NodeRow(UiNodeRowText *text, const CanopenNodeSnapshot *node)
                                   analyzer_snapshot.frame_count);
   }
   (void)snprintf(text->node_id, sizeof(text->node_id), "%u", node->node_id);
-  (void)snprintf(text->last_seen, sizeof(text->last_seen), "%5lu.%03lu",
+  (void)snprintf(text->last_seen, sizeof(text->last_seen), "%5lu.%05lu",
                  (unsigned long)(node->last_seen_us / 1000000U),
-                 (unsigned long)((node->last_seen_us / 1000U) % 1000U));
+                 (unsigned long)((node->last_seen_us / 10U) % 100000U));
   (void)snprintf(text->frames, sizeof(text->frames), "%lu", (unsigned long)node->frame_count);
   (void)snprintf(text->traffic, sizeof(text->traffic), "%lu.%lu%%",
                  (unsigned long)(traffic_permille / 10U),
                  (unsigned long)(traffic_permille % 10U));
-  if (node->sdo_request_count == 0U)
+  if (deep_sdo_mode)
+  {
+    uint32_t finished = node->sdo_completed_count + node->sdo_aborted_count +
+                        node->sdo_timeout_count + node->sdo_protocol_error_count;
+    bool uncertain = (node->sdo_conflict_count != 0U) || (node->sdo_orphan_count != 0U);
+    if (finished == 0U)
+    {
+      (void)snprintf(text->response, sizeof(text->response), uncertain ? "AMB!" : "--");
+    }
+    else
+    {
+      response_permille = (uint32_t)(((uint64_t)node->sdo_completed_count * 1000U) / finished);
+      (void)snprintf(text->response, sizeof(text->response), uncertain ? "%lu.%lu%%!" : "%lu.%lu%%",
+                     (unsigned long)(response_permille / 10U),
+                     (unsigned long)(response_permille % 10U));
+    }
+  }
+  else if (node->sdo_request_count == 0U)
   {
     (void)snprintf(text->response, sizeof(text->response), "--");
   }
@@ -743,7 +795,9 @@ static void Refresh_NodesSnapshot(void)
     content_height = UI_NODE_TABLE_HEIGHT;
   }
   lv_obj_set_height(nodes_spacer, (int32_t)content_height);
-  (void)snprintf(title, sizeof(title), "Nodes  %5lu.%05lu s  Unique:%lu",
+  (void)snprintf(title, sizeof(title), deep_sdo_mode ?
+                 "Nodes DEEP %5lu.%05lu s  Unique:%lu" :
+                 "Nodes  %5lu.%05lu s  Unique:%lu",
                  (unsigned long)(analyzer_snapshot.last_timestamp_us / 1000000U),
                  (unsigned long)((analyzer_snapshot.last_timestamp_us / 10U) % 100000U),
                  (unsigned long)analyzer_snapshot.unique_node_count);
@@ -797,6 +851,21 @@ static int32_t Compare_Events(const CanopenNodeEventSnapshot *left,
   uint32_t i;
   CanopenSdoAddress left_address = CanopenDecoder_DecodeSdoAddress(&left->frame, left->type);
   CanopenSdoAddress right_address = CanopenDecoder_DecodeSdoAddress(&right->frame, right->type);
+
+  if (left->has_sdo_address)
+  {
+    left_address.index = left->object_index;
+    left_address.subindex = left->object_subindex;
+    left_address.data_offset = left->data_offset;
+    left_address.valid = true;
+  }
+  if (right->has_sdo_address)
+  {
+    right_address.index = right->object_index;
+    right_address.subindex = right->object_subindex;
+    right_address.data_offset = right->data_offset;
+    right_address.valid = true;
+  }
 
   if (node_object_mode)
   {
@@ -897,12 +966,36 @@ static void Sort_Events(void)
   }
 }
 
+static const char *Sdo_StatusName(CanopenSdoStatus status)
+{
+  switch (status)
+  {
+    case CANOPEN_SDO_STATUS_WAITING: return "WAIT";
+    case CANOPEN_SDO_STATUS_COMPLETED: return "OK";
+    case CANOPEN_SDO_STATUS_ABORTED: return "ABORT";
+    case CANOPEN_SDO_STATUS_TIMEOUT: return "TIME";
+    case CANOPEN_SDO_STATUS_AMBIGUOUS: return "AMB";
+    case CANOPEN_SDO_STATUS_PROTOCOL_ERROR: return "ERR";
+    case CANOPEN_SDO_STATUS_ORPHAN: return "ORPH";
+    case CANOPEN_SDO_STATUS_NONE:
+    default: return "--";
+  }
+}
+
 static void Format_EventRow(UiEventRowText *text, const CanopenNodeEventSnapshot *event)
 {
   uint32_t i;
   uint32_t offset = 0U;
   uint32_t data_start = 0U;
   CanopenSdoAddress address = CanopenDecoder_DecodeSdoAddress(&event->frame, event->type);
+
+  if (event->has_sdo_address)
+  {
+    address.index = event->object_index;
+    address.subindex = event->object_subindex;
+    address.data_offset = event->data_offset;
+    address.valid = true;
+  }
 
   (void)snprintf(text->time, sizeof(text->time), "%5lu.%05lu",
                  (unsigned long)(event->frame.timestamp_us / 1000000U),
@@ -915,7 +1008,8 @@ static void Format_EventRow(UiEventRowText *text, const CanopenNodeEventSnapshot
   }
   (void)snprintf(text->id, sizeof(text->id), "%03lX", (unsigned long)event->frame.id);
   (void)snprintf(text->type, sizeof(text->type), "%s",
-                 CanopenDecoder_TypeName(event->type));
+                 (deep_sdo_mode && node_object_mode) ? Sdo_StatusName(event->sdo_status) :
+                                                       CanopenDecoder_TypeName(event->type));
   text->object[0] = '\0';
   text->subindex[0] = '\0';
   if (address.valid)
@@ -934,7 +1028,7 @@ static void Format_EventRow(UiEventRowText *text, const CanopenNodeEventSnapshot
     for (i = data_start; (i < event->frame.dlc) && (offset < (sizeof(text->data) - 3U)); ++i)
     {
       offset += (uint32_t)snprintf(&text->data[offset], sizeof(text->data) - offset,
-                                   (i == 0U) ? "%02X" : " %02X", event->frame.data[i]);
+                                   (i == data_start) ? "%02X" : " %02X", event->frame.data[i]);
     }
   }
 }
@@ -1054,6 +1148,8 @@ static void NodeEvents_ModeClicked(lv_event_t *event)
   (void)event;
   node_object_mode = !node_object_mode;
   lv_label_set_text(node_events_mode_label, node_object_mode ? "OBJ" : "ALL");
+  lv_label_set_text(node_events_type_header_label,
+                    (deep_sdo_mode && node_object_mode) ? "State" : "Type");
   event_sort_key = node_object_mode ? EVENT_SORT_OBJECT : EVENT_SORT_TIME;
   event_sort_ascending = node_object_mode;
   events_programmatic_scroll = true;
@@ -1085,6 +1181,7 @@ static void Open_NodeEvents(lv_event_t *event)
   event_sort_key = EVENT_SORT_TIME;
   event_sort_ascending = false;
   lv_label_set_text(node_events_mode_label, "ALL");
+  lv_label_set_text(node_events_type_header_label, "Type");
   Set_NodeEventsPaused(false);
   events_programmatic_scroll = true;
   lv_obj_scroll_to_y(node_events_table_body, 0, LV_ANIM_OFF);
@@ -1145,6 +1242,7 @@ void Ui_Init(void)
   lv_obj_t *bitrate_selector;
   lv_obj_t *bitrate_option_button;
   lv_obj_t *bitrate_option_label;
+  lv_obj_t *deep_sdo_button;
   lv_obj_t *reset_button;
   lv_obj_t *pause_button;
   lv_obj_t *mode_button;
@@ -1240,6 +1338,23 @@ void Ui_Init(void)
   lv_obj_set_style_text_color(bitrate_selector_label, lv_color_hex(0xF4FAFD), 0);
   lv_obj_center(bitrate_selector_label);
 
+  (void)Create_Label(settings_screen, 48, 145, 112, "SDO analysis", lv_color_hex(0xE8EEF2));
+  deep_sdo_button = lv_button_create(settings_screen);
+  lv_obj_set_pos(deep_sdo_button, 174, 129);
+  lv_obj_set_size(deep_sdo_button, 180, 42);
+  lv_obj_set_style_bg_color(deep_sdo_button, lv_color_hex(0x21343E), 0);
+  lv_obj_set_style_bg_opa(deep_sdo_button, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(deep_sdo_button, lv_color_hex(0x17698C), LV_STATE_PRESSED);
+  lv_obj_set_style_border_color(deep_sdo_button, lv_color_hex(0x65C7F7), 0);
+  lv_obj_set_style_border_width(deep_sdo_button, 1, 0);
+  lv_obj_set_style_radius(deep_sdo_button, 0, 0);
+  lv_obj_set_style_pad_all(deep_sdo_button, 0, 0);
+  lv_obj_add_event_cb(deep_sdo_button, DeepSdo_ModeClicked, LV_EVENT_CLICKED, NULL);
+  deep_sdo_button_label = lv_label_create(deep_sdo_button);
+  lv_label_set_text(deep_sdo_button_label, "[ ] Basic");
+  lv_obj_set_style_text_color(deep_sdo_button_label, lv_color_hex(0xF4FAFD), 0);
+  lv_obj_center(deep_sdo_button_label);
+
   bitrate_options_panel = lv_obj_create(settings_screen);
   lv_obj_set_pos(bitrate_options_panel, 100, 108);
   lv_obj_set_size(bitrate_options_panel, 280, 158);
@@ -1291,7 +1406,8 @@ void Ui_Init(void)
   (void)Create_TableHeader(header_panel, 40, 67, "Last", Node_HeaderClicked, NODE_SORT_LAST_SEEN);
   (void)Create_TableHeader(header_panel, 111, 57, "Frames", Node_HeaderClicked, NODE_SORT_FRAMES);
   (void)Create_TableHeader(header_panel, 172, 56, "Traffic", Node_HeaderClicked, NODE_SORT_TRAFFIC);
-  (void)Create_TableHeader(header_panel, 232, 56, "SDO %", Node_HeaderClicked, NODE_SORT_RESPONSE);
+  nodes_response_header_label = lv_obj_get_child(
+    Create_TableHeader(header_panel, 232, 56, "SDO %", Node_HeaderClicked, NODE_SORT_RESPONSE), 0);
   (void)Create_TableHeader(header_panel, 292, 142, "Last type", Node_HeaderClicked, NODE_SORT_TYPE);
   (void)Create_TableHeader(header_panel, 438, 42, ">", NULL, 0U);
 
@@ -1394,7 +1510,8 @@ void Ui_Init(void)
   (void)Create_TableHeader(header_panel, 2, 80, "Time", Event_HeaderClicked, EVENT_SORT_TIME);
   (void)Create_TableHeader(header_panel, 86, 58, "Lat us", Event_HeaderClicked, EVENT_SORT_LATENCY);
   (void)Create_TableHeader(header_panel, 148, 44, "ID", Event_HeaderClicked, EVENT_SORT_ID);
-  (void)Create_TableHeader(header_panel, 196, 56, "Type", Event_HeaderClicked, EVENT_SORT_TYPE);
+  node_events_type_header_label = lv_obj_get_child(
+    Create_TableHeader(header_panel, 196, 56, "Type", Event_HeaderClicked, EVENT_SORT_TYPE), 0);
   (void)Create_TableHeader(header_panel, 256, 44, "Obj", Event_HeaderClicked, EVENT_SORT_OBJECT);
   (void)Create_TableHeader(header_panel, 304, 30, "Sub", Event_HeaderClicked, EVENT_SORT_SUBINDEX);
   (void)Create_TableHeader(header_panel, 338, 142, "Data (LSB)", Event_HeaderClicked, EVENT_SORT_DATA);
@@ -1553,6 +1670,7 @@ void Ui_Init(void)
   events_programmatic_scroll = false;
   node_events_paused = false;
   node_object_mode = false;
+  deep_sdo_mode = false;
   rows_dirty = false;
   lv_screen_load(main_screen);
 }

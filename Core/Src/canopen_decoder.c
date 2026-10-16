@@ -122,12 +122,14 @@ CanopenSdoAddress CanopenDecoder_DecodeSdoAddress(const CanFrameRecord *frame,
   if (type == CANOPEN_MESSAGE_SDO_RX)
   {
     indexed_command = (((command >= 0x20U) && (command <= 0x3FU)) ||
-                       (command == 0x40U) || (command == 0x80U));
+                       (command == 0x40U) || (command == 0x80U) ||
+                       ((command >> 5) == 5U) || ((command >> 5) == 6U));
   }
   else if (type == CANOPEN_MESSAGE_SDO_TX)
   {
     indexed_command = (((command >= 0x40U) && (command <= 0x5FU)) ||
-                       (command == 0x60U) || (command == 0x80U));
+                       (command == 0x60U) || (command == 0x80U) ||
+                       ((command >> 5) == 5U) || ((command >> 5) == 6U));
   }
 
   if (indexed_command)

@@ -7,25 +7,28 @@
 #include <stddef.h>
 #include <string.h>
 
-#define CANOPEN_EVENT_HISTORY_LENGTH  512U
-#define CANOPEN_EVENT_HISTORY_MASK    (CANOPEN_EVENT_HISTORY_LENGTH - 1U)
+#define CANOPEN_EVENT_HISTORY_LENGTH   512U
+#define CANOPEN_EVENT_HISTORY_MASK     (CANOPEN_EVENT_HISTORY_LENGTH - 1U)
 #define CANOPEN_SDO_OBJECT_POOL_LENGTH 256U
 #define CANOPEN_SDO_OBJECT_POOL_MASK   (CANOPEN_SDO_OBJECT_POOL_LENGTH - 1U)
+#define CANOPEN_SDO_TIMEOUT_US         1000000U
 
-typedef struct
+typedef enum { SDO_TRANSFER_NONE = 0, SDO_TRANSFER_UPLOAD, SDO_TRANSFER_DOWNLOAD }
+  SdoTransferDirection;
+typedef enum { SDO_MODE_EXPEDITED = 0, SDO_MODE_SEGMENTED, SDO_MODE_BLOCK }
+  SdoTransferMode;
+typedef enum
 {
-  bool present;
-  CanopenNodeSnapshot snapshot;
-} CanopenNodeState;
+  SDO_PHASE_INIT_RESPONSE = 0,
+  SDO_PHASE_UPLOAD_REQUEST,
+  SDO_PHASE_UPLOAD_RESPONSE,
+  SDO_PHASE_DOWNLOAD_SEGMENT,
+  SDO_PHASE_DOWNLOAD_ACK,
+  SDO_PHASE_BLOCK
+} SdoTransferPhase;
 
-typedef struct
-{
-  uint8_t node_id;
-  CanopenMessageType type;
-  CanFrameRecord frame;
-  uint32_t response_time_us;
-  bool has_response_time;
-} CanopenEventState;
+typedef struct { bool present; CanopenNodeSnapshot snapshot; } CanopenNodeState;
+typedef struct { uint8_t node_id; CanopenNodeEventSnapshot snapshot; } CanopenEventState;
 
 typedef struct
 {
@@ -35,91 +38,454 @@ typedef struct
   uint8_t subindex;
   CanopenMessageType direction;
   uint32_t access_count;
-  CanFrameRecord frame;
+  CanopenNodeEventSnapshot snapshot;
+} CanopenSdoObjectState;
+
+typedef struct
+{
+  bool active;
+  bool ambiguous;
+  bool last_segment_sent;
+  uint16_t index;
+  uint8_t subindex;
+  uint8_t expected_toggle;
+  SdoTransferDirection direction;
+  SdoTransferMode mode;
+  SdoTransferPhase phase;
+  uint32_t started_us;
+  uint32_t last_activity_us;
+  uint32_t last_request_us;
+  uint32_t transferred_bytes;
+  uint16_t segment_count;
+} CanopenSdoTransaction;
+
+typedef struct
+{
+  CanopenSdoStatus status;
+  CanopenSdoConfidence confidence;
   uint32_t response_time_us;
   bool has_response_time;
-  bool pending_request;
-} CanopenSdoObjectState;
+  uint32_t transaction_time_us;
+  uint32_t transferred_bytes;
+  uint32_t abort_code;
+  uint16_t segment_count;
+  uint16_t index;
+  uint8_t subindex;
+  uint8_t data_offset;
+  bool has_address;
+} SdoFrameResult;
 
 static CanopenNodeState node_states[CANOPEN_NODE_COUNT_MAX];
 static CanopenEventState event_history[CANOPEN_EVENT_HISTORY_LENGTH];
 static CanopenSdoObjectState sdo_objects[CANOPEN_SDO_OBJECT_POOL_LENGTH];
+static CanopenSdoTransaction sdo_transactions[CANOPEN_NODE_COUNT_MAX];
 static uint32_t event_write;
 static uint32_t event_count;
 static uint32_t queue_overflows;
 static CanopenGlobalSnapshot global_snapshot;
 
-static bool Update_SdoObject(const CanFrameRecord *frame, const CanopenDecodedFrame *decoded,
-                             const CanopenSdoAddress *address, uint32_t *response_time_us)
+static CanopenSdoObjectState *Find_Object(uint8_t node_id, uint16_t index,
+                                          uint8_t subindex, CanopenMessageType direction,
+                                          bool create)
 {
-  uint32_t hash;
+  uint32_t hash = (((uint32_t)node_id * 131U) + ((uint32_t)index * 17U) +
+                   subindex + ((uint32_t)direction * 7U)) & CANOPEN_SDO_OBJECT_POOL_MASK;
   uint32_t probe;
-  CanopenSdoObjectState *current = NULL;
-
-  if (!address->valid || (response_time_us == NULL))
-  {
-    return false;
-  }
-
-  hash = (((uint32_t)decoded->node_id * 131U) + ((uint32_t)address->index * 17U) +
-          address->subindex + ((uint32_t)decoded->type * 7U)) & CANOPEN_SDO_OBJECT_POOL_MASK;
   for (probe = 0U; probe < CANOPEN_SDO_OBJECT_POOL_LENGTH; ++probe)
   {
-    CanopenSdoObjectState *object = &sdo_objects[(hash + probe) & CANOPEN_SDO_OBJECT_POOL_MASK];
+    CanopenSdoObjectState *object =
+      &sdo_objects[(hash + probe) & CANOPEN_SDO_OBJECT_POOL_MASK];
     if (!object->used)
     {
+      if (!create) return NULL;
+      memset(object, 0, sizeof(*object));
       object->used = true;
-      object->node_id = decoded->node_id;
-      object->index = address->index;
-      object->subindex = address->subindex;
-      object->direction = decoded->type;
-      current = object;
-      break;
+      object->node_id = node_id;
+      object->index = index;
+      object->subindex = subindex;
+      object->direction = direction;
+      return object;
     }
-    if ((object->node_id == decoded->node_id) &&
-        (object->index == address->index) &&
-        (object->subindex == address->subindex) &&
-        (object->direction == decoded->type))
+    if ((object->node_id == node_id) && (object->index == index) &&
+        (object->subindex == subindex) && (object->direction == direction))
     {
-      current = object;
-      break;
+      return object;
     }
   }
+  return NULL;
+}
 
-  if (current == NULL)
-  {
-    return false;
-  }
+static void Update_Object(uint8_t node_id, uint16_t index, uint8_t subindex,
+                          CanopenMessageType direction, const CanFrameRecord *frame,
+                          uint8_t data_offset, const SdoFrameResult *result)
+{
+  CanopenSdoObjectState *object = Find_Object(node_id, index, subindex, direction, true);
+  if ((object == NULL) || (frame == NULL) || (result == NULL)) return;
+  ++object->access_count;
+  object->snapshot.frame = *frame;
+  object->snapshot.type = direction;
+  object->snapshot.response_time_us = result->response_time_us;
+  object->snapshot.has_response_time = result->has_response_time;
+  object->snapshot.object_index = index;
+  object->snapshot.object_subindex = subindex;
+  object->snapshot.data_offset = data_offset;
+  object->snapshot.has_sdo_address = true;
+  object->snapshot.sdo_status = result->status;
+  object->snapshot.sdo_confidence = result->confidence;
+  object->snapshot.transaction_time_us = result->transaction_time_us;
+  object->snapshot.transferred_bytes = result->transferred_bytes;
+  object->snapshot.abort_code = result->abort_code;
+  object->snapshot.segment_count = result->segment_count;
+}
 
-  ++current->access_count;
-  current->frame = *frame;
-  current->has_response_time = false;
-  if (decoded->type == CANOPEN_MESSAGE_SDO_RX)
+static void Mark_TransactionObjects(uint8_t node_id, const CanopenSdoTransaction *transaction,
+                                    CanopenSdoStatus status, uint32_t finished_us,
+                                    uint32_t abort_code)
+{
+  uint32_t object_index;
+  CanopenSdoConfidence confidence = transaction->ambiguous ?
+    CANOPEN_SDO_CONFIDENCE_AMBIGUOUS : CANOPEN_SDO_CONFIDENCE_EXACT;
+  for (object_index = 0U; object_index < CANOPEN_SDO_OBJECT_POOL_LENGTH; ++object_index)
   {
-    current->pending_request = true;
-    return false;
-  }
-
-  if (decoded->type == CANOPEN_MESSAGE_SDO_TX)
-  {
-    for (probe = 0U; probe < CANOPEN_SDO_OBJECT_POOL_LENGTH; ++probe)
+    CanopenSdoObjectState *object = &sdo_objects[object_index];
+    if (object->used && (object->node_id == node_id) &&
+        (object->index == transaction->index) &&
+        (object->subindex == transaction->subindex))
     {
-      CanopenSdoObjectState *request = &sdo_objects[probe];
-      if (request->used && request->pending_request &&
-          (request->node_id == decoded->node_id) &&
-          (request->index == address->index) &&
-          (request->subindex == address->subindex) &&
-          (request->direction == CANOPEN_MESSAGE_SDO_RX))
-      {
-        *response_time_us = frame->timestamp_us - request->frame.timestamp_us;
-        current->response_time_us = *response_time_us;
-        current->has_response_time = true;
-        request->pending_request = false;
-        return true;
-      }
+      object->snapshot.sdo_status = status;
+      object->snapshot.sdo_confidence = confidence;
+      object->snapshot.transaction_time_us = finished_us - transaction->started_us;
+      object->snapshot.transferred_bytes = transaction->transferred_bytes;
+      object->snapshot.abort_code = abort_code;
+      object->snapshot.segment_count = transaction->segment_count;
     }
   }
-  return false;
+}
+
+static void Finish_Transaction(uint8_t node_id, CanopenSdoStatus status,
+                               uint32_t finished_us, uint32_t abort_code,
+                               SdoFrameResult *result)
+{
+  CanopenSdoTransaction *transaction = &sdo_transactions[node_id - 1U];
+  CanopenNodeSnapshot *node = &node_states[node_id - 1U].snapshot;
+  CanopenSdoConfidence confidence;
+  if (!transaction->active) return;
+  if (transaction->ambiguous && (status == CANOPEN_SDO_STATUS_COMPLETED))
+    status = CANOPEN_SDO_STATUS_AMBIGUOUS;
+  confidence = transaction->ambiguous ? CANOPEN_SDO_CONFIDENCE_AMBIGUOUS :
+                                        CANOPEN_SDO_CONFIDENCE_EXACT;
+  switch (status)
+  {
+    case CANOPEN_SDO_STATUS_COMPLETED: ++node->sdo_completed_count; break;
+    case CANOPEN_SDO_STATUS_ABORTED: ++node->sdo_aborted_count; break;
+    case CANOPEN_SDO_STATUS_TIMEOUT: ++node->sdo_timeout_count; break;
+    case CANOPEN_SDO_STATUS_PROTOCOL_ERROR: ++node->sdo_protocol_error_count; break;
+    case CANOPEN_SDO_STATUS_AMBIGUOUS: ++node->sdo_conflict_count; break;
+    default: break;
+  }
+  Mark_TransactionObjects(node_id, transaction, status, finished_us, abort_code);
+  if (result != NULL)
+  {
+    result->status = status;
+    result->confidence = confidence;
+    result->transaction_time_us = finished_us - transaction->started_us;
+    result->transferred_bytes = transaction->transferred_bytes;
+    result->abort_code = abort_code;
+    result->segment_count = transaction->segment_count;
+    result->index = transaction->index;
+    result->subindex = transaction->subindex;
+    result->has_address = true;
+  }
+  transaction->active = false;
+}
+
+static uint32_t Read_AbortCode(const CanFrameRecord *frame)
+{
+  if ((frame == NULL) || (frame->dlc < 8U)) return 0U;
+  return (uint32_t)frame->data[4] | ((uint32_t)frame->data[5] << 8) |
+         ((uint32_t)frame->data[6] << 16) | ((uint32_t)frame->data[7] << 24);
+}
+
+static void Set_ResultFromTransaction(SdoFrameResult *result,
+                                      const CanopenSdoTransaction *transaction)
+{
+  result->status = CANOPEN_SDO_STATUS_WAITING;
+  result->confidence = transaction->ambiguous ? CANOPEN_SDO_CONFIDENCE_AMBIGUOUS :
+                                                CANOPEN_SDO_CONFIDENCE_EXACT;
+  result->index = transaction->index;
+  result->subindex = transaction->subindex;
+  result->has_address = true;
+  result->transferred_bytes = transaction->transferred_bytes;
+  result->segment_count = transaction->segment_count;
+}
+
+static void Register_Orphan(uint8_t node_id, const CanopenSdoAddress *address,
+                            SdoFrameResult *result)
+{
+  ++node_states[node_id - 1U].snapshot.sdo_orphan_count;
+  result->status = CANOPEN_SDO_STATUS_ORPHAN;
+  result->confidence = CANOPEN_SDO_CONFIDENCE_NONE;
+  if ((address != NULL) && address->valid)
+  {
+    result->index = address->index;
+    result->subindex = address->subindex;
+    result->data_offset = address->data_offset;
+    result->has_address = true;
+  }
+}
+
+static void Start_Transaction(uint8_t node_id, const CanFrameRecord *frame,
+                              const CanopenSdoAddress *address, SdoFrameResult *result)
+{
+  CanopenSdoTransaction *transaction = &sdo_transactions[node_id - 1U];
+  uint8_t command = frame->data[0];
+  uint8_t ccs = command >> 5;
+  bool collision = transaction->active;
+  if (collision)
+    Finish_Transaction(node_id, CANOPEN_SDO_STATUS_AMBIGUOUS, frame->timestamp_us, 0U, NULL);
+  memset(transaction, 0, sizeof(*transaction));
+  transaction->active = true;
+  transaction->ambiguous = collision;
+  transaction->index = address->index;
+  transaction->subindex = address->subindex;
+  transaction->started_us = frame->timestamp_us;
+  transaction->last_activity_us = frame->timestamp_us;
+  transaction->last_request_us = frame->timestamp_us;
+  transaction->phase = SDO_PHASE_INIT_RESPONSE;
+  if (ccs == 2U)
+  {
+    transaction->direction = SDO_TRANSFER_UPLOAD;
+    transaction->mode = SDO_MODE_EXPEDITED;
+  }
+  else if (ccs == 1U)
+  {
+    transaction->direction = SDO_TRANSFER_DOWNLOAD;
+    transaction->mode = ((command & 0x02U) != 0U) ? SDO_MODE_EXPEDITED : SDO_MODE_SEGMENTED;
+    if ((command & 0x03U) == 0x03U)
+      transaction->transferred_bytes = 4U - ((command >> 2) & 0x03U);
+  }
+  else
+  {
+    transaction->direction = (ccs == 5U) ? SDO_TRANSFER_UPLOAD : SDO_TRANSFER_DOWNLOAD;
+    transaction->mode = SDO_MODE_BLOCK;
+    transaction->phase = SDO_PHASE_BLOCK;
+    transaction->ambiguous = true;
+  }
+  ++node_states[node_id - 1U].snapshot.sdo_started_count;
+  Set_ResultFromTransaction(result, transaction);
+  result->data_offset = address->data_offset;
+  Update_Object(node_id, address->index, address->subindex, CANOPEN_MESSAGE_SDO_RX,
+                frame, address->data_offset, result);
+}
+
+static void Process_ClientSdo(uint8_t node_id, const CanFrameRecord *frame,
+                              const CanopenSdoAddress *address, SdoFrameResult *result)
+{
+  CanopenSdoTransaction *transaction = &sdo_transactions[node_id - 1U];
+  uint8_t command = frame->data[0];
+  uint8_t ccs = command >> 5;
+  if (command == 0x80U)
+  {
+    uint32_t abort_code = Read_AbortCode(frame);
+    if (transaction->active && address->valid &&
+        (transaction->index == address->index) && (transaction->subindex == address->subindex))
+    {
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_ABORTED,
+                         frame->timestamp_us, abort_code, result);
+      result->data_offset = address->data_offset;
+      Update_Object(node_id, address->index, address->subindex,
+                    CANOPEN_MESSAGE_SDO_RX, frame, address->data_offset, result);
+    }
+    else
+    {
+      Register_Orphan(node_id, address, result);
+      if (address->valid)
+        Update_Object(node_id, address->index, address->subindex,
+                      CANOPEN_MESSAGE_SDO_RX, frame, address->data_offset, result);
+    }
+    return;
+  }
+  if (address->valid && ((ccs == 1U) || (ccs == 2U) || (ccs == 5U) || (ccs == 6U)))
+  {
+    Start_Transaction(node_id, frame, address, result);
+    return;
+  }
+  if (!transaction->active)
+  {
+    Register_Orphan(node_id, NULL, result);
+    return;
+  }
+  transaction->last_activity_us = frame->timestamp_us;
+  Set_ResultFromTransaction(result, transaction);
+  result->data_offset = 1U;
+  if (transaction->mode == SDO_MODE_BLOCK)
+    Finish_Transaction(node_id, CANOPEN_SDO_STATUS_AMBIGUOUS, frame->timestamp_us, 0U, result);
+  else if ((transaction->direction == SDO_TRANSFER_UPLOAD) && (ccs == 3U) &&
+           (transaction->phase == SDO_PHASE_UPLOAD_REQUEST))
+  {
+    if (((command >> 4) & 1U) != transaction->expected_toggle)
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_PROTOCOL_ERROR,
+                         frame->timestamp_us, 0U, result);
+    else
+    {
+      transaction->last_request_us = frame->timestamp_us;
+      transaction->phase = SDO_PHASE_UPLOAD_RESPONSE;
+    }
+  }
+  else if ((transaction->direction == SDO_TRANSFER_DOWNLOAD) && (ccs == 0U) &&
+           (transaction->phase == SDO_PHASE_DOWNLOAD_SEGMENT))
+  {
+    uint8_t unused = (command >> 1) & 0x07U;
+    if ((((command >> 4) & 1U) != transaction->expected_toggle) || (unused > 7U))
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_PROTOCOL_ERROR,
+                         frame->timestamp_us, 0U, result);
+    else
+    {
+      transaction->transferred_bytes += 7U - unused;
+      ++transaction->segment_count;
+      transaction->last_segment_sent = (command & 0x01U) != 0U;
+      transaction->last_request_us = frame->timestamp_us;
+      transaction->phase = SDO_PHASE_DOWNLOAD_ACK;
+      result->transferred_bytes = transaction->transferred_bytes;
+      result->segment_count = transaction->segment_count;
+    }
+  }
+  else Finish_Transaction(node_id, CANOPEN_SDO_STATUS_PROTOCOL_ERROR,
+                          frame->timestamp_us, 0U, result);
+  Update_Object(node_id, result->index, result->subindex, CANOPEN_MESSAGE_SDO_RX,
+                frame, 1U, result);
+}
+
+static void Process_ServerSdo(uint8_t node_id, const CanFrameRecord *frame,
+                              const CanopenSdoAddress *address, SdoFrameResult *result)
+{
+  CanopenSdoTransaction *transaction = &sdo_transactions[node_id - 1U];
+  uint8_t command = frame->data[0];
+  uint8_t scs = command >> 5;
+  if (command == 0x80U)
+  {
+    uint32_t abort_code = Read_AbortCode(frame);
+    if (transaction->active && address->valid &&
+        (transaction->index == address->index) && (transaction->subindex == address->subindex))
+    {
+      result->response_time_us = frame->timestamp_us - transaction->last_request_us;
+      result->has_response_time = true;
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_ABORTED,
+                         frame->timestamp_us, abort_code, result);
+      result->data_offset = address->data_offset;
+      Update_Object(node_id, address->index, address->subindex,
+                    CANOPEN_MESSAGE_SDO_TX, frame, address->data_offset, result);
+    }
+    else
+    {
+      Register_Orphan(node_id, address, result);
+      if (address->valid)
+        Update_Object(node_id, address->index, address->subindex,
+                      CANOPEN_MESSAGE_SDO_TX, frame, address->data_offset, result);
+    }
+    return;
+  }
+  if (!transaction->active)
+  {
+    Register_Orphan(node_id, address, result);
+    if (address->valid)
+      Update_Object(node_id, address->index, address->subindex,
+                    CANOPEN_MESSAGE_SDO_TX, frame, address->data_offset, result);
+    return;
+  }
+  if (address->valid && ((transaction->index != address->index) ||
+                         (transaction->subindex != address->subindex)))
+  {
+    Finish_Transaction(node_id, CANOPEN_SDO_STATUS_AMBIGUOUS, frame->timestamp_us, 0U, NULL);
+    Register_Orphan(node_id, address, result);
+    Update_Object(node_id, address->index, address->subindex,
+                  CANOPEN_MESSAGE_SDO_TX, frame, address->data_offset, result);
+    return;
+  }
+  transaction->last_activity_us = frame->timestamp_us;
+  Set_ResultFromTransaction(result, transaction);
+  result->response_time_us = frame->timestamp_us - transaction->last_request_us;
+  result->has_response_time = true;
+  result->data_offset = address->valid ? address->data_offset : 1U;
+  if (transaction->mode == SDO_MODE_BLOCK)
+    Finish_Transaction(node_id, CANOPEN_SDO_STATUS_AMBIGUOUS, frame->timestamp_us, 0U, result);
+  else if ((transaction->phase == SDO_PHASE_INIT_RESPONSE) && address->valid &&
+           (transaction->direction == SDO_TRANSFER_UPLOAD) && (scs == 2U))
+  {
+    if ((command & 0x02U) != 0U)
+    {
+      if ((command & 0x01U) != 0U)
+        transaction->transferred_bytes = 4U - ((command >> 2) & 0x03U);
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_COMPLETED,
+                         frame->timestamp_us, 0U, result);
+    }
+    else
+    {
+      transaction->mode = SDO_MODE_SEGMENTED;
+      transaction->phase = SDO_PHASE_UPLOAD_REQUEST;
+    }
+  }
+  else if ((transaction->phase == SDO_PHASE_INIT_RESPONSE) && address->valid &&
+           (transaction->direction == SDO_TRANSFER_DOWNLOAD) && (command == 0x60U))
+  {
+    if (transaction->mode == SDO_MODE_EXPEDITED)
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_COMPLETED,
+                         frame->timestamp_us, 0U, result);
+    else transaction->phase = SDO_PHASE_DOWNLOAD_SEGMENT;
+  }
+  else if ((transaction->direction == SDO_TRANSFER_UPLOAD) && (scs == 0U) &&
+           (transaction->phase == SDO_PHASE_UPLOAD_RESPONSE))
+  {
+    uint8_t unused = (command >> 1) & 0x07U;
+    if ((((command >> 4) & 1U) != transaction->expected_toggle) || (unused > 7U))
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_PROTOCOL_ERROR,
+                         frame->timestamp_us, 0U, result);
+    else
+    {
+      transaction->transferred_bytes += 7U - unused;
+      ++transaction->segment_count;
+      transaction->expected_toggle ^= 1U;
+      result->transferred_bytes = transaction->transferred_bytes;
+      result->segment_count = transaction->segment_count;
+      if ((command & 0x01U) != 0U)
+        Finish_Transaction(node_id, CANOPEN_SDO_STATUS_COMPLETED,
+                           frame->timestamp_us, 0U, result);
+      else transaction->phase = SDO_PHASE_UPLOAD_REQUEST;
+    }
+  }
+  else if ((transaction->direction == SDO_TRANSFER_DOWNLOAD) && (scs == 1U) &&
+           (transaction->phase == SDO_PHASE_DOWNLOAD_ACK))
+  {
+    if (((command >> 4) & 1U) != transaction->expected_toggle)
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_PROTOCOL_ERROR,
+                         frame->timestamp_us, 0U, result);
+    else if (transaction->last_segment_sent)
+      Finish_Transaction(node_id, CANOPEN_SDO_STATUS_COMPLETED,
+                         frame->timestamp_us, 0U, result);
+    else
+    {
+      transaction->expected_toggle ^= 1U;
+      transaction->phase = SDO_PHASE_DOWNLOAD_SEGMENT;
+    }
+  }
+  else Finish_Transaction(node_id, CANOPEN_SDO_STATUS_PROTOCOL_ERROR,
+                          frame->timestamp_us, 0U, result);
+  Update_Object(node_id, result->index, result->subindex, CANOPEN_MESSAGE_SDO_TX,
+                frame, result->data_offset, result);
+}
+
+static SdoFrameResult Process_Sdo(uint8_t node_id, CanopenMessageType type,
+                                  const CanFrameRecord *frame,
+                                  const CanopenSdoAddress *address)
+{
+  SdoFrameResult result;
+  memset(&result, 0, sizeof(result));
+  if (((frame->flags & CAN_FRAME_FLAG_REMOTE) != 0U) || (frame->dlc == 0U))
+    Register_Orphan(node_id, address, &result);
+  else if (type == CANOPEN_MESSAGE_SDO_RX)
+    Process_ClientSdo(node_id, frame, address, &result);
+  else Process_ServerSdo(node_id, frame, address, &result);
+  return result;
 }
 
 void CanopenAnalyzer_Init(void)
@@ -127,6 +493,7 @@ void CanopenAnalyzer_Init(void)
   memset(node_states, 0, sizeof(node_states));
   memset(event_history, 0, sizeof(event_history));
   memset(sdo_objects, 0, sizeof(sdo_objects));
+  memset(sdo_transactions, 0, sizeof(sdo_transactions));
   event_write = 0U;
   event_count = 0U;
   queue_overflows = 0U;
@@ -136,19 +503,14 @@ void CanopenAnalyzer_Init(void)
 void CanopenAnalyzer_ProcessFrame(const CanFrameRecord *frame)
 {
   CanopenDecodedFrame decoded;
-  CanopenSdoAddress sdo_address;
+  CanopenSdoAddress address;
   CanopenNodeState *node;
   CanopenEventState *event;
-  uint32_t response_time_us = 0U;
-  bool has_response_time;
-
-  if (frame == NULL)
-  {
-    return;
-  }
-
+  SdoFrameResult result;
+  if (frame == NULL) return;
   decoded = CanopenDecoder_Decode(frame);
-  sdo_address = CanopenDecoder_DecodeSdoAddress(frame, decoded.type);
+  address = CanopenDecoder_DecodeSdoAddress(frame, decoded.type);
+  memset(&result, 0, sizeof(result));
   taskENTER_CRITICAL();
   ++global_snapshot.frame_count;
   global_snapshot.last_timestamp_us = frame->timestamp_us;
@@ -157,7 +519,6 @@ void CanopenAnalyzer_ProcessFrame(const CanFrameRecord *frame)
     taskEXIT_CRITICAL();
     return;
   }
-
   node = &node_states[decoded.node_id - 1U];
   if (!node->present)
   {
@@ -173,60 +534,74 @@ void CanopenAnalyzer_ProcessFrame(const CanFrameRecord *frame)
   if (decoded.type == CANOPEN_MESSAGE_SDO_RX)
   {
     ++node->snapshot.sdo_request_count;
+    result = Process_Sdo(decoded.node_id, decoded.type, frame, &address);
   }
   else if (decoded.type == CANOPEN_MESSAGE_SDO_TX)
   {
     ++node->snapshot.sdo_response_count;
+    result = Process_Sdo(decoded.node_id, decoded.type, frame, &address);
   }
-  has_response_time = Update_SdoObject(frame, &decoded, &sdo_address, &response_time_us);
-
   event = &event_history[event_write & CANOPEN_EVENT_HISTORY_MASK];
+  memset(event, 0, sizeof(*event));
   event->node_id = decoded.node_id;
-  event->type = decoded.type;
-  event->frame = *frame;
-  event->response_time_us = response_time_us;
-  event->has_response_time = has_response_time;
+  event->snapshot.frame = *frame;
+  event->snapshot.type = decoded.type;
+  event->snapshot.response_time_us = result.response_time_us;
+  event->snapshot.has_response_time = result.has_response_time;
+  event->snapshot.object_index = result.index;
+  event->snapshot.object_subindex = result.subindex;
+  event->snapshot.data_offset = result.data_offset;
+  event->snapshot.has_sdo_address = result.has_address;
+  event->snapshot.sdo_status = result.status;
+  event->snapshot.sdo_confidence = result.confidence;
+  event->snapshot.transaction_time_us = result.transaction_time_us;
+  event->snapshot.transferred_bytes = result.transferred_bytes;
+  event->snapshot.abort_code = result.abort_code;
+  event->snapshot.segment_count = result.segment_count;
   ++event_write;
-  if (event_count < CANOPEN_EVENT_HISTORY_LENGTH)
+  if (event_count < CANOPEN_EVENT_HISTORY_LENGTH) ++event_count;
+  taskEXIT_CRITICAL();
+}
+
+void CanopenAnalyzer_Update(uint32_t now_us)
+{
+  uint32_t node_index;
+  taskENTER_CRITICAL();
+  for (node_index = 0U; node_index < CANOPEN_NODE_COUNT_MAX; ++node_index)
   {
-    ++event_count;
+    CanopenSdoTransaction *transaction = &sdo_transactions[node_index];
+    if (transaction->active &&
+        ((uint32_t)(now_us - transaction->last_activity_us) >= CANOPEN_SDO_TIMEOUT_US))
+      Finish_Transaction((uint8_t)(node_index + 1U), CANOPEN_SDO_STATUS_TIMEOUT,
+                         now_us, 0U, NULL);
   }
   taskEXIT_CRITICAL();
 }
 
 void CanopenAnalyzer_AddQueueOverflow(void)
 {
+  uint32_t node_index;
   taskENTER_CRITICAL();
   ++queue_overflows;
+  for (node_index = 0U; node_index < CANOPEN_NODE_COUNT_MAX; ++node_index)
+  {
+    if (sdo_transactions[node_index].active)
+      Finish_Transaction((uint8_t)(node_index + 1U), CANOPEN_SDO_STATUS_AMBIGUOUS,
+                         global_snapshot.last_timestamp_us, 0U, NULL);
+  }
   taskEXIT_CRITICAL();
 }
 
 uint32_t CanopenAnalyzer_GetNodesSnapshot(CanopenNodeSnapshot *nodes, uint32_t capacity,
                                           CanopenGlobalSnapshot *global)
 {
-  uint32_t node_index;
-  uint32_t copied = 0U;
-
-  if ((nodes == NULL) || (capacity == 0U))
-  {
-    return 0U;
-  }
-
+  uint32_t node_index, copied = 0U;
+  if ((nodes == NULL) || (capacity == 0U)) return 0U;
   taskENTER_CRITICAL();
-  if (global != NULL)
-  {
-    *global = global_snapshot;
-  }
-  for (node_index = 0U;
-       (node_index < CANOPEN_NODE_COUNT_MAX) && (copied < capacity);
+  if (global != NULL) *global = global_snapshot;
+  for (node_index = 0U; (node_index < CANOPEN_NODE_COUNT_MAX) && (copied < capacity);
        ++node_index)
-  {
-    if (node_states[node_index].present)
-    {
-      nodes[copied] = node_states[node_index].snapshot;
-      ++copied;
-    }
-  }
+    if (node_states[node_index].present) nodes[copied++] = node_states[node_index].snapshot;
   taskEXIT_CRITICAL();
   return copied;
 }
@@ -235,27 +610,14 @@ uint32_t CanopenAnalyzer_GetNodeEventsSnapshot(uint8_t node_id,
                                                CanopenNodeEventSnapshot *events,
                                                uint32_t capacity)
 {
-  uint32_t age;
-  uint32_t copied = 0U;
-
-  if ((node_id < 1U) || (node_id > 127U) || (events == NULL) || (capacity == 0U))
-  {
-    return 0U;
-  }
-
+  uint32_t age, copied = 0U;
+  if ((node_id < 1U) || (node_id > 127U) || (events == NULL) || (capacity == 0U)) return 0U;
   taskENTER_CRITICAL();
   for (age = 0U; (age < event_count) && (copied < capacity); ++age)
   {
     const CanopenEventState *event =
       &event_history[(event_write - 1U - age) & CANOPEN_EVENT_HISTORY_MASK];
-    if (event->node_id == node_id)
-    {
-      events[copied].frame = event->frame;
-      events[copied].type = event->type;
-      events[copied].response_time_us = event->response_time_us;
-      events[copied].has_response_time = event->has_response_time;
-      ++copied;
-    }
+    if (event->node_id == node_id) events[copied++] = event->snapshot;
   }
   taskEXIT_CRITICAL();
   return copied;
@@ -265,28 +627,14 @@ uint32_t CanopenAnalyzer_GetNodeObjectsSnapshot(uint8_t node_id,
                                                 CanopenNodeEventSnapshot *events,
                                                 uint32_t capacity)
 {
-  uint32_t object_index;
-  uint32_t copied = 0U;
-
-  if ((node_id < 1U) || (node_id > 127U) || (events == NULL) || (capacity == 0U))
-  {
-    return 0U;
-  }
-
+  uint32_t object_index, copied = 0U;
+  if ((node_id < 1U) || (node_id > 127U) || (events == NULL) || (capacity == 0U)) return 0U;
   taskENTER_CRITICAL();
   for (object_index = 0U;
-       (object_index < CANOPEN_SDO_OBJECT_POOL_LENGTH) && (copied < capacity);
-       ++object_index)
+       (object_index < CANOPEN_SDO_OBJECT_POOL_LENGTH) && (copied < capacity); ++object_index)
   {
     const CanopenSdoObjectState *object = &sdo_objects[object_index];
-    if (object->used && (object->node_id == node_id))
-    {
-      events[copied].frame = object->frame;
-      events[copied].type = object->direction;
-      events[copied].response_time_us = object->response_time_us;
-      events[copied].has_response_time = object->has_response_time;
-      ++copied;
-    }
+    if (object->used && (object->node_id == node_id)) events[copied++] = object->snapshot;
   }
   taskEXIT_CRITICAL();
   return copied;
@@ -294,10 +642,7 @@ uint32_t CanopenAnalyzer_GetNodeObjectsSnapshot(uint8_t node_id,
 
 void CanopenAnalyzer_GetGlobalSnapshot(CanopenGlobalSnapshot *global)
 {
-  if (global == NULL)
-  {
-    return;
-  }
+  if (global == NULL) return;
   taskENTER_CRITICAL();
   *global = global_snapshot;
   taskEXIT_CRITICAL();
@@ -318,6 +663,7 @@ void CanopenAnalyzer_Reset(void)
   memset(node_states, 0, sizeof(node_states));
   memset(event_history, 0, sizeof(event_history));
   memset(sdo_objects, 0, sizeof(sdo_objects));
+  memset(sdo_transactions, 0, sizeof(sdo_transactions));
   event_write = 0U;
   event_count = 0U;
   queue_overflows = 0U;

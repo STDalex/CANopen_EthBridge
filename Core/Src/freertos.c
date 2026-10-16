@@ -258,7 +258,7 @@ void StartAnalyzerTask(void const * argument)
   (void)argument;
   for(;;)
   {
-    if (xQueueReceive(analyzerFrameQueue, &frame, portMAX_DELAY) == pdPASS)
+    if (xQueueReceive(analyzerFrameQueue, &frame, pdMS_TO_TICKS(20U)) == pdPASS)
     {
       CanopenAnalyzer_ProcessFrame(&frame);
       while (xQueueReceive(analyzerFrameQueue, &frame, 0U) == pdPASS)
@@ -266,6 +266,7 @@ void StartAnalyzerTask(void const * argument)
         CanopenAnalyzer_ProcessFrame(&frame);
       }
     }
+    CanopenAnalyzer_Update(CanCapture_GetTimestampUs());
   }
   /* USER CODE END StartAnalyzerTask */
 }

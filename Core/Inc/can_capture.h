@@ -44,5 +44,6 @@ void CanControl_RequestBitrate(uint32_t bitrate_kbps);
 void CanControl_GetStatus(CanCaptureStatus *status);
 void CanControl_AddGuiOverflow(void);
 void CanControl_ResetStatistics(void);
+uint32_t CanCapture_GetTimestampUs(void);
 
 #endif

@@ -84,6 +84,13 @@ int main(void)
   address = CanopenDecoder_DecodeSdoAddress(&frame, CANOPEN_MESSAGE_SDO_RX);
   assert(!address.valid);
 
+  frame.data[0] = 0xA0U;
+  frame.data[1] = 0x06U;
+  frame.data[2] = 0x20U;
+  frame.data[3] = 0x01U;
+  address = CanopenDecoder_DecodeSdoAddress(&frame, CANOPEN_MESSAGE_SDO_RX);
+  assert(address.valid && (address.index == 0x2006U) && (address.subindex == 0x01U));
+
   puts("CANopen decoder tests passed");
   return 0;
 }

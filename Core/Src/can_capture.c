@@ -306,6 +306,11 @@ void CanControl_ResetStatistics(void)
   taskEXIT_CRITICAL();
 }
 
+uint32_t CanCapture_GetTimestampUs(void)
+{
+  return TIM2->CNT - timestamp_epoch_us;
+}
+
 void CanControl_Task(void)
 {
   uint32_t scan_index = 0U;
