@@ -16,7 +16,7 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define LCD_WIDTH              480U
 #define LCD_HEIGHT             272U
 #define LCD_FRAMEBUFFER        0xC0000000UL
-#define CAN_SNIFFER_VERSION    "2.6.0"
+#define CAN_SNIFFER_VERSION    "2.6.1"
 #define UI_DRAW_LINES          24U
 #define UI_VISIBLE_ROWS        12U
 #define UI_HISTORY_LENGTH      256U
@@ -1076,6 +1076,43 @@ static void Render_EventRows(void)
   }
 }
 
+static void Format_NodeEventsTitle(char *title, uint32_t capacity)
+{
+  uint32_t index;
+
+  if (!deep_sdo_mode)
+  {
+    CanopenAnalyzer_GetGlobalSnapshot(&analyzer_snapshot);
+    (void)snprintf(title, capacity, "Node %u  %5lu.%05lu s  #%lu", selected_node_id,
+                   (unsigned long)(analyzer_snapshot.last_timestamp_us / 1000000U),
+                   (unsigned long)((analyzer_snapshot.last_timestamp_us / 10U) % 100000U),
+                   (unsigned long)event_snapshot_count);
+    return;
+  }
+
+  node_snapshot_count = CanopenAnalyzer_GetNodesSnapshot(node_snapshot,
+                                                          CANOPEN_NODE_COUNT_MAX,
+                                                          &analyzer_snapshot);
+  for (index = 0U; index < node_snapshot_count; ++index)
+  {
+    if (node_snapshot[index].node_id == selected_node_id)
+    {
+      (void)snprintf(title, capacity, "N%u %lu.%05lu OK:%lu TO:%lu AB:%lu AM:%lu",
+                     selected_node_id,
+                     (unsigned long)(analyzer_snapshot.last_timestamp_us / 1000000U),
+                     (unsigned long)((analyzer_snapshot.last_timestamp_us / 10U) % 100000U),
+                     (unsigned long)node_snapshot[index].sdo_completed_count,
+                     (unsigned long)node_snapshot[index].sdo_timeout_count,
+                     (unsigned long)node_snapshot[index].sdo_aborted_count,
+                     (unsigned long)node_snapshot[index].sdo_conflict_count);
+      return;
+    }
+  }
+  (void)snprintf(title, capacity, "N%u %lu.%05lu OK:0 TO:0 AB:0 AM:0", selected_node_id,
+                 (unsigned long)(analyzer_snapshot.last_timestamp_us / 1000000U),
+                 (unsigned long)((analyzer_snapshot.last_timestamp_us / 10U) % 100000U));
+}
+
 static void Refresh_NodeEventsSnapshot(void)
 {
   uint32_t content_height;
@@ -1101,10 +1138,7 @@ static void Refresh_NodeEventsSnapshot(void)
     content_height = UI_EVENT_TABLE_HEIGHT;
   }
   lv_obj_set_height(node_events_spacer, (int32_t)content_height);
-  (void)snprintf(title, sizeof(title), "Node %u  %5lu.%05lu s  #%lu", selected_node_id,
-                 (unsigned long)(analyzer_snapshot.last_timestamp_us / 1000000U),
-                 (unsigned long)((analyzer_snapshot.last_timestamp_us / 10U) % 100000U),
-                 (unsigned long)event_snapshot_count);
+  Format_NodeEventsTitle(title, sizeof(title));
   lv_label_set_text(node_events_title_label, title);
   Render_EventRows();
 }
@@ -1112,11 +1146,7 @@ static void Refresh_NodeEventsSnapshot(void)
 static void Update_NodeEventsHeader(void)
 {
   char title[48];
-  CanopenAnalyzer_GetGlobalSnapshot(&analyzer_snapshot);
-  (void)snprintf(title, sizeof(title), "Node %u  %5lu.%05lu s  #%lu", selected_node_id,
-                 (unsigned long)(analyzer_snapshot.last_timestamp_us / 1000000U),
-                 (unsigned long)((analyzer_snapshot.last_timestamp_us / 10U) % 100000U),
-                 (unsigned long)event_snapshot_count);
+  Format_NodeEventsTitle(title, sizeof(title));
   lv_label_set_text(node_events_title_label, title);
 }
 

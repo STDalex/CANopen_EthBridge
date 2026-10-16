@@ -240,7 +240,27 @@ static void Start_Transaction(uint8_t node_id, const CanFrameRecord *frame,
   CanopenSdoTransaction *transaction = &sdo_transactions[node_id - 1U];
   uint8_t command = frame->data[0];
   uint8_t ccs = command >> 5;
+  SdoTransferDirection requested_direction =
+    ((ccs == 2U) || (ccs == 5U)) ? SDO_TRANSFER_UPLOAD : SDO_TRANSFER_DOWNLOAD;
   bool collision = transaction->active;
+
+  if (collision && (transaction->index == address->index) &&
+      (transaction->subindex == address->subindex) &&
+      (transaction->direction == requested_direction))
+  {
+    if (!transaction->ambiguous)
+    {
+      transaction->ambiguous = true;
+      ++node_states[node_id - 1U].snapshot.sdo_conflict_count;
+    }
+    transaction->last_activity_us = frame->timestamp_us;
+    transaction->last_request_us = frame->timestamp_us;
+    Set_ResultFromTransaction(result, transaction);
+    result->data_offset = address->data_offset;
+    Update_Object(node_id, address->index, address->subindex, CANOPEN_MESSAGE_SDO_RX,
+                  frame, address->data_offset, result);
+    return;
+  }
   if (collision)
     Finish_Transaction(node_id, CANOPEN_SDO_STATUS_AMBIGUOUS, frame->timestamp_us, 0U, NULL);
   memset(transaction, 0, sizeof(*transaction));
@@ -254,19 +274,19 @@ static void Start_Transaction(uint8_t node_id, const CanFrameRecord *frame,
   transaction->phase = SDO_PHASE_INIT_RESPONSE;
   if (ccs == 2U)
   {
-    transaction->direction = SDO_TRANSFER_UPLOAD;
+    transaction->direction = requested_direction;
     transaction->mode = SDO_MODE_EXPEDITED;
   }
   else if (ccs == 1U)
   {
-    transaction->direction = SDO_TRANSFER_DOWNLOAD;
+    transaction->direction = requested_direction;
     transaction->mode = ((command & 0x02U) != 0U) ? SDO_MODE_EXPEDITED : SDO_MODE_SEGMENTED;
     if ((command & 0x03U) == 0x03U)
       transaction->transferred_bytes = 4U - ((command >> 2) & 0x03U);
   }
   else
   {
-    transaction->direction = (ccs == 5U) ? SDO_TRANSFER_UPLOAD : SDO_TRANSFER_DOWNLOAD;
+    transaction->direction = requested_direction;
     transaction->mode = SDO_MODE_BLOCK;
     transaction->phase = SDO_PHASE_BLOCK;
     transaction->ambiguous = true;
@@ -571,7 +591,7 @@ void CanopenAnalyzer_Update(uint32_t now_us)
   {
     CanopenSdoTransaction *transaction = &sdo_transactions[node_index];
     if (transaction->active &&
-        ((uint32_t)(now_us - transaction->last_activity_us) >= CANOPEN_SDO_TIMEOUT_US))
+        ((uint32_t)(now_us - transaction->started_us) >= CANOPEN_SDO_TIMEOUT_US))
       Finish_Transaction((uint8_t)(node_index + 1U), CANOPEN_SDO_STATUS_TIMEOUT,
                          now_us, 0U, NULL);
   }
