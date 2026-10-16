@@ -410,6 +410,16 @@
               <FilePath>../Core/Src/can_capture.c</FilePath>
             </File>
             <File>
+              <FileName>canopen_decoder.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/canopen_decoder.c</FilePath>
+            </File>
+            <File>
+              <FileName>canopen_analyzer.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/canopen_analyzer.c</FilePath>
+            </File>
+            <File>
               <FileName>touch_ft5336.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/touch_ft5336.c</FilePath>
@@ -418,6 +428,11 @@
               <FileName>ui.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/ui.c</FilePath>
+            </File>
+            <File>
+              <FileName>ui_font_cyrillic_14.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/ui_font_cyrillic_14.c</FilePath>
             </File>
             <File>
               <FileName>gpio.c</FileName>

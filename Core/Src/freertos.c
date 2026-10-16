@@ -27,6 +27,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "can_capture.h"
+#include "can_pipeline.h"
+#include "canopen_analyzer.h"
 #include "ui.h"
 
 /* USER CODE END Includes */
@@ -49,9 +51,13 @@
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
 #define GUI_FRAME_QUEUE_LENGTH 64U
+#define ANALYZER_FRAME_QUEUE_LENGTH 128U
 static StaticQueue_t guiFrameQueueControlBlock;
 static uint8_t guiFrameQueueStorage[GUI_FRAME_QUEUE_LENGTH * sizeof(CanFrameRecord)];
 static QueueHandle_t guiFrameQueue;
+static StaticQueue_t analyzerFrameQueueControlBlock;
+static uint8_t analyzerFrameQueueStorage[ANALYZER_FRAME_QUEUE_LENGTH * sizeof(CanFrameRecord)];
+static QueueHandle_t analyzerFrameQueue;
 
 /* USER CODE END Variables */
 osThreadId canRxTaskHandle;
@@ -60,6 +66,9 @@ osStaticThreadDef_t canRxTaskControlBlock;
 osThreadId canControlTaskHandle;
 uint32_t canControlTaskBuffer[ 1024 ];
 osStaticThreadDef_t canControlTaskControlBlock;
+osThreadId analyzerTaskHandle;
+uint32_t analyzerTaskBuffer[ 1536 ];
+osStaticThreadDef_t analyzerTaskControlBlock;
 osThreadId guiTaskHandle;
 uint32_t guiTaskBuffer[ 4096 ];
 osStaticThreadDef_t guiTaskControlBlock;
@@ -71,6 +80,7 @@ osStaticThreadDef_t guiTaskControlBlock;
 
 void StartCanRxTask(void const * argument);
 void StartCanControlTask(void const * argument);
+void StartAnalyzerTask(void const * argument);
 void StartGuiTask(void const * argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -83,6 +93,16 @@ void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName);
 void vApplicationMallocFailedHook(void);
 
 /* USER CODE BEGIN 4 */
+void CanPipeline_ResetStatistics(void)
+{
+  taskENTER_CRITICAL();
+  (void)xQueueReset(guiFrameQueue);
+  (void)xQueueReset(analyzerFrameQueue);
+  CanControl_ResetStatistics();
+  CanopenAnalyzer_Reset();
+  taskEXIT_CRITICAL();
+}
+
 __weak void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName)
 {
    /* Run time stack overflow checking is performed if
@@ -147,6 +167,11 @@ void MX_FREERTOS_Init(void) {
                                      sizeof(CanFrameRecord),
                                      guiFrameQueueStorage,
                                      &guiFrameQueueControlBlock);
+  analyzerFrameQueue = xQueueCreateStatic(ANALYZER_FRAME_QUEUE_LENGTH,
+                                          sizeof(CanFrameRecord),
+                                          analyzerFrameQueueStorage,
+                                          &analyzerFrameQueueControlBlock);
+  CanopenAnalyzer_Init();
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -158,8 +183,12 @@ void MX_FREERTOS_Init(void) {
   osThreadStaticDef(canControlTask, StartCanControlTask, osPriorityHigh, 0, 1024, canControlTaskBuffer, &canControlTaskControlBlock);
   canControlTaskHandle = osThreadCreate(osThread(canControlTask), NULL);
 
+  /* definition and creation of analyzerTask */
+  osThreadStaticDef(analyzerTask, StartAnalyzerTask, osPriorityAboveNormal, 0, 1536, analyzerTaskBuffer, &analyzerTaskControlBlock);
+  analyzerTaskHandle = osThreadCreate(osThread(analyzerTask), NULL);
+
   /* definition and creation of guiTask */
-  osThreadStaticDef(guiTask, StartGuiTask, osPriorityAboveNormal, 0, 4096, guiTaskBuffer, &guiTaskControlBlock);
+  osThreadStaticDef(guiTask, StartGuiTask, osPriorityNormal, 0, 4096, guiTaskBuffer, &guiTaskControlBlock);
   guiTaskHandle = osThreadCreate(osThread(guiTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -187,6 +216,10 @@ void StartCanRxTask(void const * argument)
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20U));
     while (CanCapture_Pop(&frame))
     {
+      if (xQueueSend(analyzerFrameQueue, &frame, 0U) != pdPASS)
+      {
+        CanopenAnalyzer_AddQueueOverflow();
+      }
       if (xQueueSend(guiFrameQueue, &frame, 0U) != pdPASS)
       {
         CanControl_AddGuiOverflow();
@@ -209,6 +242,32 @@ void StartCanControlTask(void const * argument)
   (void)argument;
   CanControl_Task();
   /* USER CODE END StartCanControlTask */
+}
+
+/* USER CODE BEGIN Header_StartAnalyzerTask */
+/**
+* @brief Function implementing the analyzerTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartAnalyzerTask */
+void StartAnalyzerTask(void const * argument)
+{
+  /* USER CODE BEGIN StartAnalyzerTask */
+  CanFrameRecord frame;
+  (void)argument;
+  for(;;)
+  {
+    if (xQueueReceive(analyzerFrameQueue, &frame, portMAX_DELAY) == pdPASS)
+    {
+      CanopenAnalyzer_ProcessFrame(&frame);
+      while (xQueueReceive(analyzerFrameQueue, &frame, 0U) == pdPASS)
+      {
+        CanopenAnalyzer_ProcessFrame(&frame);
+      }
+    }
+  }
+  /* USER CODE END StartAnalyzerTask */
 }
 
 /* USER CODE BEGIN Header_StartGuiTask */

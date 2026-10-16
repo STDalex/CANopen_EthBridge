@@ -41,6 +41,11 @@ static volatile uint32_t received_count;
 static volatile uint32_t ring_overflow_count;
 static volatile uint32_t gui_overflow_count;
 static volatile uint32_t error_count;
+static volatile uint32_t received_statistics_base;
+static volatile uint32_t ring_overflow_statistics_base;
+static volatile uint32_t gui_overflow_statistics_base;
+static volatile uint32_t error_statistics_base;
+static volatile uint32_t timestamp_epoch_us;
 static volatile uint32_t last_valid_tick;
 static volatile uint32_t requested_bitrate;
 static volatile uint32_t active_bitrate;
@@ -141,12 +146,17 @@ void CanCapture_Init(void)
   ring_overflow_count = 0U;
   gui_overflow_count = 0U;
   error_count = 0U;
+  received_statistics_base = 0U;
+  ring_overflow_statistics_base = 0U;
+  gui_overflow_statistics_base = 0U;
+  error_statistics_base = 0U;
   last_valid_tick = HAL_GetTick();
   requested_bitrate = 0U;
   active_bitrate = 0U;
   sync_state = CAN_SYNC_SEARCHING;
   consumer_task = NULL;
   TimestampTimer_Init();
+  timestamp_epoch_us = TIM2->CNT;
 }
 
 void CanCapture_SetConsumerTask(void *task_handle)
@@ -185,7 +195,7 @@ void CanCapture_RxIRQHandler(void)
     if ((write_index - ring_read) < CAN_RING_LENGTH)
     {
       CanFrameRecord *frame = &frame_ring[write_index & CAN_RING_MASK];
-      frame->timestamp_us = TIM2->CNT;
+      frame->timestamp_us = TIM2->CNT - timestamp_epoch_us;
       frame->flags = 0U;
       if ((rir & CAN_RI0R_IDE) != 0U)
       {
@@ -270,10 +280,10 @@ void CanControl_GetStatus(CanCaptureStatus *status)
   taskENTER_CRITICAL();
   status->bitrate_kbps = active_bitrate;
   status->state = sync_state;
-  status->received = received_count;
-  status->ring_overflows = ring_overflow_count;
-  status->gui_overflows = gui_overflow_count;
-  status->errors = error_count;
+  status->received = received_count - received_statistics_base;
+  status->ring_overflows = ring_overflow_count - ring_overflow_statistics_base;
+  status->gui_overflows = gui_overflow_count - gui_overflow_statistics_base;
+  status->errors = error_count - error_statistics_base;
   taskEXIT_CRITICAL();
 }
 
@@ -281,6 +291,18 @@ void CanControl_AddGuiOverflow(void)
 {
   taskENTER_CRITICAL();
   ++gui_overflow_count;
+  taskEXIT_CRITICAL();
+}
+
+void CanControl_ResetStatistics(void)
+{
+  taskENTER_CRITICAL();
+  ring_read = ring_write;
+  timestamp_epoch_us = TIM2->CNT;
+  received_statistics_base = received_count;
+  ring_overflow_statistics_base = ring_overflow_count;
+  gui_overflow_statistics_base = gui_overflow_count;
+  error_statistics_base = error_count;
   taskEXIT_CRITICAL();
 }
 
