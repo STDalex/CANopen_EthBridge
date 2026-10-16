@@ -16,7 +16,7 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define LCD_WIDTH              480U
 #define LCD_HEIGHT             272U
 #define LCD_FRAMEBUFFER        0xC0000000UL
-#define CAN_SNIFFER_VERSION    "2.6.2"
+#define CAN_SNIFFER_VERSION    "2.7.0"
 #define UI_DRAW_LINES          24U
 #define UI_VISIBLE_ROWS        12U
 #define UI_HISTORY_LENGTH      256U
@@ -172,7 +172,8 @@ static bool deep_sdo_mode;
 
 static const char info_monitor_text[] =
   "Монитор: все принятые CAN-кадры с временем, ID, форматом, DLC и данными. "
-  "Пауза останавливает таблицу, но прием продолжается.";
+  "LOAD - средняя оценка занятого времени CAN с последнего сброса с учетом "
+  "скорости, длины кадров и bit stuffing. Пауза не останавливает прием.";
 static const char info_nodes_text[] =
   "Basic: SDO % - отношение ответов к запросам. Deep: OK % - доля завершенных "
   "операций среди OK, TO, AB и ERR. 100%! означает 100% успешных из однозначно "
@@ -1745,18 +1746,28 @@ void Ui_TaskLoop(void)
   if ((now - last_status_update) >= 250U)
   {
     char text[96];
+    char main_text[112];
     const char *state;
+    uint32_t drops;
     CanControl_GetStatus(&status);
     state = (status.state == CAN_SYNC_LOCKED) ? "LOCK" :
             ((status.state == CAN_SYNC_MANUAL) ? "MAN" : "SCAN");
+    drops = status.ring_overflows + status.gui_overflows +
+            CanopenAnalyzer_GetQueueOverflows();
     (void)snprintf(text, sizeof(text), "CAN %s%s %lu k  RX:%lu  DROP:%lu  ERR:%lu",
                    display_paused ? "PAUSE/" : "", state, (unsigned long)status.bitrate_kbps,
                    (unsigned long)status.received,
-                   (unsigned long)(status.ring_overflows + status.gui_overflows +
-                                   CanopenAnalyzer_GetQueueOverflows()),
+                   (unsigned long)drops,
+                   (unsigned long)status.errors);
+    (void)snprintf(main_text, sizeof(main_text),
+                   "CAN %s %lu k  LOAD:%lu.%lu%%  RX:%lu  DROP:%lu  ERR:%lu",
+                   state, (unsigned long)status.bitrate_kbps,
+                   (unsigned long)(status.bus_load_permille / 10U),
+                   (unsigned long)(status.bus_load_permille % 10U),
+                   (unsigned long)status.received, (unsigned long)drops,
                    (unsigned long)status.errors);
     lv_label_set_text(status_label, text);
-    lv_label_set_text(main_status_label, text);
+    lv_label_set_text(main_status_label, main_text);
     last_status_update = now;
   }
 

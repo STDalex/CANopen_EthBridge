@@ -45,12 +45,46 @@ static volatile uint32_t received_statistics_base;
 static volatile uint32_t ring_overflow_statistics_base;
 static volatile uint32_t gui_overflow_statistics_base;
 static volatile uint32_t error_statistics_base;
+static volatile uint64_t estimated_busy_time_ns;
+static volatile uint64_t estimated_busy_statistics_base;
+static volatile uint32_t statistics_started_tick;
 static volatile uint32_t timestamp_epoch_us;
 static volatile uint32_t last_valid_tick;
 static volatile uint32_t requested_bitrate;
 static volatile uint32_t active_bitrate;
 static volatile CanSyncState sync_state;
 static TaskHandle_t consumer_task;
+
+static uint32_t NanosecondsPerBit(uint32_t bitrate_kbps)
+{
+  switch (bitrate_kbps)
+  {
+    case 1000U: return 1000U;
+    case 800U: return 1250U;
+    case 500U: return 2000U;
+    case 250U: return 4000U;
+    case 125U: return 8000U;
+    case 100U: return 10000U;
+    case 50U: return 20000U;
+    case 20U: return 50000U;
+    case 10U: return 100000U;
+    default: return 0U;
+  }
+}
+
+static uint32_t EstimateFrameBits(uint32_t rir, uint32_t rdtr)
+{
+  bool extended = (rir & CAN_RI0R_IDE) != 0U;
+  bool remote = (rir & CAN_RI0R_RTR) != 0U;
+  uint32_t dlc = rdtr & CAN_RDT0R_DLC;
+  uint32_t data_bits;
+  uint32_t stuffable_bits;
+
+  if (dlc > 8U) dlc = 8U;
+  data_bits = remote ? 0U : (dlc * 8U);
+  stuffable_bits = (extended ? 54U : 34U) + data_bits;
+  return (extended ? 67U : 47U) + data_bits + ((stuffable_bits - 1U) / 4U);
+}
 
 static void TimestampTimer_Init(void)
 {
@@ -150,6 +184,9 @@ void CanCapture_Init(void)
   ring_overflow_statistics_base = 0U;
   gui_overflow_statistics_base = 0U;
   error_statistics_base = 0U;
+  estimated_busy_time_ns = 0U;
+  estimated_busy_statistics_base = 0U;
+  statistics_started_tick = HAL_GetTick();
   last_valid_tick = HAL_GetTick();
   requested_bitrate = 0U;
   active_bitrate = 0U;
@@ -191,6 +228,13 @@ void CanCapture_RxIRQHandler(void)
     uint32_t rdtr = CAN1->sFIFOMailBox[0].RDTR;
     uint32_t rdlr = CAN1->sFIFOMailBox[0].RDLR;
     uint32_t rdhr = CAN1->sFIFOMailBox[0].RDHR;
+    uint32_t nanoseconds_per_bit = NanosecondsPerBit(active_bitrate);
+
+    if (nanoseconds_per_bit != 0U)
+    {
+      estimated_busy_time_ns +=
+        (uint64_t)EstimateFrameBits(rir, rdtr) * nanoseconds_per_bit;
+    }
 
     if ((write_index - ring_read) < CAN_RING_LENGTH)
     {
@@ -273,6 +317,10 @@ void CanControl_RequestBitrate(uint32_t bitrate_kbps)
 
 void CanControl_GetStatus(CanCaptureStatus *status)
 {
+  uint64_t busy_time_ns;
+  uint32_t elapsed_ms;
+  uint64_t load_permille;
+
   if (status == NULL)
   {
     return;
@@ -284,7 +332,13 @@ void CanControl_GetStatus(CanCaptureStatus *status)
   status->ring_overflows = ring_overflow_count - ring_overflow_statistics_base;
   status->gui_overflows = gui_overflow_count - gui_overflow_statistics_base;
   status->errors = error_count - error_statistics_base;
+  busy_time_ns = estimated_busy_time_ns - estimated_busy_statistics_base;
+  elapsed_ms = HAL_GetTick() - statistics_started_tick;
   taskEXIT_CRITICAL();
+
+  load_permille = (elapsed_ms == 0U) ? 0U : (busy_time_ns / ((uint64_t)elapsed_ms * 1000U));
+  if (load_permille > 1000U) load_permille = 1000U;
+  status->bus_load_permille = (uint16_t)load_permille;
 }
 
 void CanControl_AddGuiOverflow(void)
@@ -303,6 +357,8 @@ void CanControl_ResetStatistics(void)
   ring_overflow_statistics_base = ring_overflow_count;
   gui_overflow_statistics_base = gui_overflow_count;
   error_statistics_base = error_count;
+  estimated_busy_statistics_base = estimated_busy_time_ns;
+  statistics_started_tick = HAL_GetTick();
   taskEXIT_CRITICAL();
 }
 

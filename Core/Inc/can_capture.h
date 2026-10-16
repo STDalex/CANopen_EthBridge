@@ -31,6 +31,7 @@ typedef struct
   uint32_t ring_overflows;
   uint32_t gui_overflows;
   uint32_t errors;
+  uint16_t bus_load_permille;
 } CanCaptureStatus;
 
 void CanCapture_Init(void);
