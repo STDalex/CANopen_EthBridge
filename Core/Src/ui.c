@@ -16,7 +16,7 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define LCD_WIDTH              480U
 #define LCD_HEIGHT             272U
 #define LCD_FRAMEBUFFER        0xC0000000UL
-#define CAN_SNIFFER_VERSION    "2.6.1"
+#define CAN_SNIFFER_VERSION    "2.6.2"
 #define UI_DRAW_LINES          24U
 #define UI_VISIBLE_ROWS        12U
 #define UI_HISTORY_LENGTH      256U
@@ -174,11 +174,13 @@ static const char info_monitor_text[] =
   "Монитор: все принятые CAN-кадры с временем, ID, форматом, DLC и данными. "
   "Пауза останавливает таблицу, но прием продолжается.";
 static const char info_nodes_text[] =
-  "Ноды: список уникальных CANopen-нод и доля трафика. В базовом режиме показан "
-  "процент ответов SDO, в глубоком - процент успешно завершенных операций.";
+  "Basic: SDO % - отношение ответов к запросам. Deep: OK % - доля завершенных "
+  "операций среди OK, TO, AB и ERR. 100%! означает 100% успешных из однозначно "
+  "завершенных, но также обнаружены AM или ORPH.";
 static const char info_objects_text[] =
-  "Объекты: уникальные пары SDO object/subindex. Запрос расположен перед ответом; "
-  "глубокий режим показывает WAIT, OK, ABORT, TIME, AMB, ERR и ORPH без новых колонок.";
+  "Deep/OBJ: OK - завершенная операция; TO - таймаут; AB - SDO Abort; "
+  "AM - неоднозначная или перекрывающаяся операция. WAIT - ожидание ответа; "
+  "ERR - ошибка протокола; ORPH - ответ без наблюдавшегося запроса.";
 static const char info_bitrate_text[] =
   "Скорость: Auto перебирает поддерживаемые скорости. Ручной режим фиксирует "
   "выбранное значение. CAN работает только на прием.";
