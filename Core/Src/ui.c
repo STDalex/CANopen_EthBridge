@@ -16,7 +16,7 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define LCD_WIDTH              480U
 #define LCD_HEIGHT             272U
 #define LCD_FRAMEBUFFER        0xC0000000UL
-#define CAN_SNIFFER_VERSION    "2.7.0"
+#define CAN_SNIFFER_VERSION    "2.7.1"
 #define UI_DRAW_LINES          24U
 #define UI_VISIBLE_ROWS        12U
 #define UI_HISTORY_LENGTH      256U
@@ -172,8 +172,9 @@ static bool deep_sdo_mode;
 
 static const char info_monitor_text[] =
   "Монитор: все принятые CAN-кадры с временем, ID, форматом, DLC и данными. "
-  "LOAD - средняя оценка занятого времени CAN с последнего сброса с учетом "
-  "скорости, длины кадров и bit stuffing. Пауза не останавливает прием.";
+  "LOAD - оценка занятого времени CAN за последнюю секунду с учетом скорости, "
+  "длины кадров и bit stuffing. Значение обновляется раз в секунду. "
+  "Пауза не останавливает прием.";
 static const char info_nodes_text[] =
   "Basic: SDO % - отношение ответов к запросам. Deep: OK % - доля завершенных "
   "операций среди OK, TO, AB и ERR. 100%! означает 100% успешных из однозначно "

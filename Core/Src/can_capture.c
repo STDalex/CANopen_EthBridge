@@ -46,8 +46,9 @@ static volatile uint32_t ring_overflow_statistics_base;
 static volatile uint32_t gui_overflow_statistics_base;
 static volatile uint32_t error_statistics_base;
 static volatile uint64_t estimated_busy_time_ns;
-static volatile uint64_t estimated_busy_statistics_base;
-static volatile uint32_t statistics_started_tick;
+static volatile uint64_t load_window_busy_base;
+static volatile uint32_t load_window_started_tick;
+static volatile uint16_t current_bus_load_permille;
 static volatile uint32_t timestamp_epoch_us;
 static volatile uint32_t last_valid_tick;
 static volatile uint32_t requested_bitrate;
@@ -185,8 +186,9 @@ void CanCapture_Init(void)
   gui_overflow_statistics_base = 0U;
   error_statistics_base = 0U;
   estimated_busy_time_ns = 0U;
-  estimated_busy_statistics_base = 0U;
-  statistics_started_tick = HAL_GetTick();
+  load_window_busy_base = 0U;
+  load_window_started_tick = HAL_GetTick();
+  current_bus_load_permille = 0U;
   last_valid_tick = HAL_GetTick();
   requested_bitrate = 0U;
   active_bitrate = 0U;
@@ -317,28 +319,32 @@ void CanControl_RequestBitrate(uint32_t bitrate_kbps)
 
 void CanControl_GetStatus(CanCaptureStatus *status)
 {
-  uint64_t busy_time_ns;
-  uint32_t elapsed_ms;
-  uint64_t load_permille;
+  uint32_t now;
 
   if (status == NULL)
   {
     return;
   }
+  now = HAL_GetTick();
   taskENTER_CRITICAL();
+  if ((uint32_t)(now - load_window_started_tick) >= 1000U)
+  {
+    uint32_t elapsed_ms = now - load_window_started_tick;
+    uint64_t busy_time_ns = estimated_busy_time_ns - load_window_busy_base;
+    uint64_t load_permille = busy_time_ns / ((uint64_t)elapsed_ms * 1000U);
+    if (load_permille > 1000U) load_permille = 1000U;
+    current_bus_load_permille = (uint16_t)load_permille;
+    load_window_busy_base = estimated_busy_time_ns;
+    load_window_started_tick = now;
+  }
   status->bitrate_kbps = active_bitrate;
   status->state = sync_state;
   status->received = received_count - received_statistics_base;
   status->ring_overflows = ring_overflow_count - ring_overflow_statistics_base;
   status->gui_overflows = gui_overflow_count - gui_overflow_statistics_base;
   status->errors = error_count - error_statistics_base;
-  busy_time_ns = estimated_busy_time_ns - estimated_busy_statistics_base;
-  elapsed_ms = HAL_GetTick() - statistics_started_tick;
+  status->bus_load_permille = current_bus_load_permille;
   taskEXIT_CRITICAL();
-
-  load_permille = (elapsed_ms == 0U) ? 0U : (busy_time_ns / ((uint64_t)elapsed_ms * 1000U));
-  if (load_permille > 1000U) load_permille = 1000U;
-  status->bus_load_permille = (uint16_t)load_permille;
 }
 
 void CanControl_AddGuiOverflow(void)
@@ -357,8 +363,9 @@ void CanControl_ResetStatistics(void)
   ring_overflow_statistics_base = ring_overflow_count;
   gui_overflow_statistics_base = gui_overflow_count;
   error_statistics_base = error_count;
-  estimated_busy_statistics_base = estimated_busy_time_ns;
-  statistics_started_tick = HAL_GetTick();
+  load_window_busy_base = estimated_busy_time_ns;
+  load_window_started_tick = HAL_GetTick();
+  current_bus_load_permille = 0U;
   taskEXIT_CRITICAL();
 }
 
