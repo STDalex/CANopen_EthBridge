@@ -10,6 +10,8 @@
 typedef struct
 {
   uint32_t timestamp_us;
+  uint32_t capture_time_us;
+  uint32_t capture_time_high;
   uint32_t id;
   uint8_t dlc;
   uint8_t flags;
@@ -39,6 +41,7 @@ void CanCapture_SetConsumerTask(void *task_handle);
 bool CanCapture_Pop(CanFrameRecord *frame);
 void CanCapture_RxIRQHandler(void);
 void CanCapture_ErrorIRQHandler(void);
+void CanCapture_TimerIRQHandler(void);
 
 void CanControl_Task(void);
 void CanControl_RequestBitrate(uint32_t bitrate_kbps);

@@ -213,6 +213,8 @@ void Error_Handler(void);
 #define FMC_D12_GPIO_Port GPIOE
 #define FMC_D10_Pin GPIO_PIN_13
 #define FMC_D10_GPIO_Port GPIOE
+#define SD_DETECT_Pin GPIO_PIN_13
+#define SD_DETECT_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
 

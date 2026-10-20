@@ -340,7 +340,7 @@
               <MiscControls>-Wno-padded -Wno-implicit-int-conversion -Wno-declaration-after-statement -Wno-missing-prototypes -Wno-cast-align -Wno-unused-function -Wno-missing-field-initializers -Wno-sign-conversion -Wno-implicit-fallthrough -Wno-extra-semi-stmt -Wno-newline-eof -Wno-cast-qual -Wno-assign-enum -Wno-switch-enum -Wno-missing-variable-declarations -Wno-unreachable-code-return -Wno-unused-parameter -Wno-missing-noreturn -Wno-disabled-macro-expansion -Wno-covered-switch-default -Wno-shorten-64-to-32 -Wno-invalid-utf8 -Wno-format-nonliteral -Wno-unreachable-code -Wno-bad-function-cast -Wno-comma -Wno-bitfield-enum-conversion -Wno-unreachable-code-break</MiscControls>
               <Define>USE_HAL_DRIVER,STM32F746xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1;../Drivers/CMSIS/Device/ST/STM32F7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/lvgl;../Middlewares/Third_Party/lvgl/include</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1;../Drivers/CMSIS/Device/ST/STM32F7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/lvgl;../Middlewares/Third_Party/lvgl/include;../Middlewares/Third_Party/FatFs/src</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -358,7 +358,7 @@
               <MiscControls></MiscControls>
               <Define></Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1;../Drivers/CMSIS/Device/ST/STM32F7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/lvgl;../Middlewares/Third_Party/lvgl/include</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1;../Drivers/CMSIS/Device/ST/STM32F7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/lvgl;../Middlewares/Third_Party/lvgl/include;../Middlewares/Third_Party/FatFs/src</IncludePath>
             </VariousControls>
           </Aads>
           <LDads>
@@ -418,6 +418,21 @@
               <FileName>canopen_analyzer.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/canopen_analyzer.c</FilePath>
+            </File>
+            <File>
+              <FileName>can_log.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/can_log.c</FilePath>
+            </File>
+            <File>
+              <FileName>sdmmc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sdmmc.c</FilePath>
+            </File>
+            <File>
+              <FileName>sd_diskio.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/sd_diskio.c</FilePath>
             </File>
             <File>
               <FileName>touch_ft5336.c</FileName>
@@ -618,6 +633,16 @@
               <FileName>stm32f7xx_hal_dsi.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Drivers/STM32F7xx_HAL_Driver/Src/stm32f7xx_hal_dsi.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32f7xx_hal_sd.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32F7xx_HAL_Driver/Src/stm32f7xx_hal_sd.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32f7xx_ll_sdmmc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Drivers/STM32F7xx_HAL_Driver/Src/stm32f7xx_ll_sdmmc.c</FilePath>
             </File>
           </Files>
         </Group>
@@ -1848,6 +1873,21 @@
               <FileName>lv_win.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Middlewares/Third_Party/lvgl/src/widgets/win/lv_win.c</FilePath>
+            </File>
+          </Files>
+        </Group>
+        <Group>
+          <GroupName>Middlewares/FatFs</GroupName>
+          <Files>
+            <File>
+              <FileName>ff.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/ff.c</FilePath>
+            </File>
+            <File>
+              <FileName>unicode.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Middlewares/Third_Party/FatFs/src/option/unicode.c</FilePath>
             </File>
           </Files>
         </Group>

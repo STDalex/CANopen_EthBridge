@@ -50,6 +50,7 @@ static volatile uint64_t load_window_busy_base;
 static volatile uint32_t load_window_started_tick;
 static volatile uint16_t current_bus_load_permille;
 static volatile uint32_t timestamp_epoch_us;
+static volatile uint32_t capture_time_high;
 static volatile uint32_t last_valid_tick;
 static volatile uint32_t requested_bitrate;
 static volatile uint32_t active_bitrate;
@@ -105,7 +106,11 @@ static void TimestampTimer_Init(void)
   TIM2->PSC = (timer_clock / 1000000U) - 1U;
   TIM2->ARR = 0xFFFFFFFFU;
   TIM2->EGR = TIM_EGR_UG;
+  TIM2->SR = 0U;
+  TIM2->DIER = TIM_DIER_UIE;
   TIM2->CNT = 0U;
+  HAL_NVIC_SetPriority(TIM2_IRQn, 6U, 0U);
+  HAL_NVIC_EnableIRQ(TIM2_IRQn);
   TIM2->CR1 = TIM_CR1_CEN;
 }
 
@@ -196,6 +201,7 @@ void CanCapture_Init(void)
   consumer_task = NULL;
   TimestampTimer_Init();
   timestamp_epoch_us = TIM2->CNT;
+  capture_time_high = 0U;
 }
 
 void CanCapture_SetConsumerTask(void *task_handle)
@@ -241,7 +247,15 @@ void CanCapture_RxIRQHandler(void)
     if ((write_index - ring_read) < CAN_RING_LENGTH)
     {
       CanFrameRecord *frame = &frame_ring[write_index & CAN_RING_MASK];
-      frame->timestamp_us = TIM2->CNT - timestamp_epoch_us;
+      uint32_t capture_high = capture_time_high;
+      uint32_t capture_time_us = TIM2->CNT;
+      if ((TIM2->SR & TIM_SR_UIF) != 0U)
+      {
+        capture_high += 1U;
+      }
+      frame->timestamp_us = capture_time_us - timestamp_epoch_us;
+      frame->capture_time_us = capture_time_us;
+      frame->capture_time_high = capture_high;
       frame->flags = 0U;
       if ((rir & CAN_RI0R_IDE) != 0U)
       {
@@ -305,6 +319,15 @@ void CanCapture_ErrorIRQHandler(void)
   }
   CAN1->ESR |= CAN_ESR_LEC;
   CAN1->MSR = CAN_MSR_ERRI;
+}
+
+void CanCapture_TimerIRQHandler(void)
+{
+  if ((TIM2->SR & TIM_SR_UIF) != 0U)
+  {
+    TIM2->SR &= ~TIM_SR_UIF;
+    ++capture_time_high;
+  }
 }
 
 void CanControl_RequestBitrate(uint32_t bitrate_kbps)

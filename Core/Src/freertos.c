@@ -27,8 +27,10 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "can_capture.h"
+#include "can_log.h"
 #include "can_pipeline.h"
 #include "canopen_analyzer.h"
+#include "memory_layout.h"
 #include "ui.h"
 
 /* USER CODE END Includes */
@@ -58,6 +60,8 @@ static QueueHandle_t guiFrameQueue;
 static StaticQueue_t analyzerFrameQueueControlBlock;
 static uint8_t analyzerFrameQueueStorage[ANALYZER_FRAME_QUEUE_LENGTH * sizeof(CanFrameRecord)];
 static QueueHandle_t analyzerFrameQueue;
+static StaticTask_t storageTaskControlBlock;
+static StackType_t storageTaskStack[STORAGE_TASK_STACK_WORDS];
 
 /* USER CODE END Variables */
 osThreadId canRxTaskHandle;
@@ -70,11 +74,11 @@ osThreadId analyzerTaskHandle;
 uint32_t analyzerTaskBuffer[ 1536 ];
 osStaticThreadDef_t analyzerTaskControlBlock;
 osThreadId guiTaskHandle;
-uint32_t guiTaskBuffer[ 4096 ];
 osStaticThreadDef_t guiTaskControlBlock;
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
+static void StartStorageTask(void *argument);
 
 /* USER CODE END FunctionPrototypes */
 
@@ -100,6 +104,7 @@ void CanPipeline_ResetStatistics(void)
   (void)xQueueReset(analyzerFrameQueue);
   CanControl_ResetStatistics();
   CanopenAnalyzer_Reset();
+  CanLogger_ResetCounters();
   taskEXIT_CRITICAL();
 }
 
@@ -172,6 +177,7 @@ void MX_FREERTOS_Init(void) {
                                           analyzerFrameQueueStorage,
                                           &analyzerFrameQueueControlBlock);
   CanopenAnalyzer_Init();
+  CanLogger_Init();
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -188,11 +194,17 @@ void MX_FREERTOS_Init(void) {
   analyzerTaskHandle = osThreadCreate(osThread(analyzerTask), NULL);
 
   /* definition and creation of guiTask */
-  osThreadStaticDef(guiTask, StartGuiTask, osPriorityNormal, 0, 4096, guiTaskBuffer, &guiTaskControlBlock);
+  osThreadStaticDef(guiTask, StartGuiTask, osPriorityNormal, 0,
+                    GUI_TASK_STACK_WORDS, (uint32_t *)GUI_TASK_STACK_BASE,
+                    &guiTaskControlBlock);
   guiTaskHandle = osThreadCreate(osThread(guiTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
-  /* add threads, ... */
+  (void)xTaskCreateStatic(StartStorageTask, "storageTask",
+                          STORAGE_TASK_STACK_WORDS,
+                          NULL, tskIDLE_PRIORITY + 2U,
+                          storageTaskStack,
+                          &storageTaskControlBlock);
   /* USER CODE END RTOS_THREADS */
 
 }
@@ -214,8 +226,10 @@ void StartCanRxTask(void const * argument)
   for(;;)
   {
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20U));
+    CanLogger_ProducerPoll();
     while (CanCapture_Pop(&frame))
     {
+      CanLogger_SubmitFrame(&frame);
       if (xQueueSend(analyzerFrameQueue, &frame, 0U) != pdPASS)
       {
         CanopenAnalyzer_AddQueueOverflow();
@@ -225,6 +239,7 @@ void StartCanRxTask(void const * argument)
         CanControl_AddGuiOverflow();
       }
     }
+    CanLogger_ProducerPoll();
   }
   /* USER CODE END StartCanRxTask */
 }
@@ -303,6 +318,11 @@ void StartGuiTask(void const * argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+static void StartStorageTask(void *argument)
+{
+  (void)argument;
+  CanLogger_StorageTask();
+}
 
 /* USER CODE END Application */
 

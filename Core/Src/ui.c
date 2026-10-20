@@ -1,5 +1,7 @@
 #include "ui.h"
 
+#include "app_version.h"
+#include "can_log.h"
 #include "canopen_analyzer.h"
 #include "can_pipeline.h"
 #include "cmsis_os.h"
@@ -16,7 +18,6 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define LCD_WIDTH              480U
 #define LCD_HEIGHT             272U
 #define LCD_FRAMEBUFFER        0xC0000000UL
-#define CAN_SNIFFER_VERSION    "2.7.1"
 #define UI_DRAW_LINES          24U
 #define UI_VISIBLE_ROWS        12U
 #define UI_HISTORY_LENGTH      256U
@@ -54,7 +55,7 @@ typedef struct
 
 typedef struct
 {
-  char node_id[4];
+  char node_id[6];
   char last_seen[12];
   char frames[11];
   char traffic[8];
@@ -122,9 +123,15 @@ static lv_obj_t *settings_screen;
 static lv_obj_t *nodes_screen;
 static lv_obj_t *node_events_screen;
 static lv_obj_t *info_screen;
+static lv_obj_t *log_screen;
 static lv_obj_t *status_label;
 static lv_obj_t *main_status_label;
+static lv_obj_t *main_storage_label;
 static lv_obj_t *pause_button_label;
+static lv_obj_t *monitor_log_button;
+static lv_obj_t *monitor_log_button_label;
+static lv_obj_t *nodes_log_button;
+static lv_obj_t *nodes_log_button_label;
 static lv_obj_t *table_body;
 static lv_obj_t *history_spacer;
 static lv_obj_t *cell_labels[UI_VISIBLE_ROWS][6];
@@ -136,6 +143,9 @@ static bool rows_dirty;
 static bool display_paused;
 static bool programmatic_scroll;
 static lv_obj_t *nodes_title_label;
+static lv_obj_t *nodes_back_button;
+static lv_obj_t *nodes_back_button_label;
+static lv_obj_t *nodes_return_screen;
 static lv_obj_t *nodes_table_body;
 static lv_obj_t *nodes_spacer;
 static lv_obj_t *node_cell_labels[UI_NODE_VISIBLE_ROWS][6];
@@ -169,6 +179,13 @@ static lv_obj_t *bitrate_selector_label;
 static lv_obj_t *bitrate_options_panel;
 static lv_obj_t *deep_sdo_button_label;
 static bool deep_sdo_mode;
+static lv_obj_t *log_mode_button_label;
+static lv_obj_t *log_card_label;
+static lv_obj_t *log_file_label;
+static lv_obj_t *log_space_label;
+static lv_obj_t *log_counters_label;
+static lv_obj_t *log_selection_label;
+static CanLogMode quick_log_mode = CAN_LOG_MODE_FULL;
 
 static const char info_monitor_text[] =
   "Монитор: все принятые CAN-кадры с временем, ID, форматом, DLC и данными. "
@@ -194,6 +211,8 @@ static const char info_packet_types_text[] =
 static void Refresh_NodesSnapshot(void);
 static void Refresh_NodeEventsSnapshot(void);
 static void Render_Rows(void);
+static void Render_NodeRows(void);
+static void Refresh_LogStatus(void);
 
 static void Cache_Clean(const void *address, uint32_t size)
 {
@@ -293,6 +312,49 @@ static void DeepSdo_ModeClicked(lv_event_t *event)
   }
 }
 
+static void Log_ModeClicked(lv_event_t *event)
+{
+  CanLogMode mode = CanLogger_GetMode();
+  (void)event;
+  if (mode != CAN_LOG_MODE_OFF)
+  {
+    quick_log_mode = mode;
+  }
+  mode = (mode == CAN_LOG_MODE_OFF) ? CAN_LOG_MODE_FULL :
+         ((mode == CAN_LOG_MODE_FULL) ? CAN_LOG_MODE_SELECTED : CAN_LOG_MODE_OFF);
+  if (mode != CAN_LOG_MODE_OFF)
+  {
+    quick_log_mode = mode;
+  }
+  CanLogger_SetMode(mode);
+  Refresh_LogStatus();
+}
+
+static void Quick_LogClicked(lv_event_t *event)
+{
+  CanLogMode mode = CanLogger_GetMode();
+  (void)event;
+
+  if (mode == CAN_LOG_MODE_OFF)
+  {
+    CanLogger_SetMode(quick_log_mode);
+  }
+  else
+  {
+    quick_log_mode = mode;
+    CanLogger_SetMode(CAN_LOG_MODE_OFF);
+  }
+  Refresh_LogStatus();
+}
+
+static void Log_ClearNodesClicked(lv_event_t *event)
+{
+  (void)event;
+  CanLogger_ClearSelectedNodes();
+  Render_NodeRows();
+  Refresh_LogStatus();
+}
+
 static void Reset_StatisticsClicked(lv_event_t *event)
 {
   (void)event;
@@ -325,6 +387,13 @@ static void Style_Screen(lv_obj_t *screen)
 static void Navigation_Clicked(lv_event_t *event)
 {
   lv_obj_t *target = (lv_obj_t *)lv_event_get_user_data(event);
+  lv_obj_t *source = lv_screen_active();
+
+  if ((lv_event_get_current_target_obj(event) == nodes_back_button) &&
+      (nodes_return_screen != NULL))
+  {
+    target = nodes_return_screen;
+  }
   if (target != NULL)
   {
     if (target == monitor_screen)
@@ -333,7 +402,21 @@ static void Navigation_Clicked(lv_event_t *event)
     }
     else if (target == nodes_screen)
     {
+      if (source == log_screen)
+      {
+        nodes_return_screen = log_screen;
+        lv_label_set_text(nodes_back_button_label, LV_SYMBOL_LEFT);
+      }
+      else if (source == main_screen)
+      {
+        nodes_return_screen = main_screen;
+        lv_label_set_text(nodes_back_button_label, LV_SYMBOL_HOME);
+      }
       Refresh_NodesSnapshot();
+    }
+    else if (target == log_screen)
+    {
+      Refresh_LogStatus();
     }
     lv_screen_load(target);
   }
@@ -378,6 +461,27 @@ static lv_obj_t *Create_NavigationButton(lv_obj_t *parent, int32_t x, int32_t y,
   lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
   lv_label_set_text(label, text);
   lv_obj_center(label);
+  return button;
+}
+
+static lv_obj_t *Create_QuickLogButton(lv_obj_t *parent, int32_t x,
+                                       lv_obj_t **label)
+{
+  lv_obj_t *button = lv_button_create(parent);
+
+  lv_obj_set_pos(button, x, 1);
+  lv_obj_set_size(button, 76, 34);
+  lv_obj_set_style_bg_color(button, lv_color_hex(0x17698C), 0);
+  lv_obj_set_style_bg_color(button, lv_color_hex(0x238DB8), LV_STATE_PRESSED);
+  lv_obj_set_style_border_color(button, lv_color_hex(0x65C7F7), 0);
+  lv_obj_set_style_border_width(button, 1, 0);
+  lv_obj_set_style_radius(button, 5, 0);
+  lv_obj_set_style_pad_all(button, 0, 0);
+  lv_obj_add_event_cb(button, Quick_LogClicked, LV_EVENT_CLICKED, NULL);
+
+  *label = lv_label_create(button);
+  lv_label_set_text(*label, "LOG " LV_SYMBOL_PLAY);
+  lv_obj_center(*label);
   return button;
 }
 
@@ -691,7 +795,8 @@ static void Format_NodeRow(UiNodeRowText *text, const CanopenNodeSnapshot *node)
     traffic_permille = (uint32_t)(((uint64_t)node->frame_count * 1000U) /
                                   analyzer_snapshot.frame_count);
   }
-  (void)snprintf(text->node_id, sizeof(text->node_id), "%u", node->node_id);
+  (void)snprintf(text->node_id, sizeof(text->node_id), "%c%u",
+                 CanLogger_IsNodeSelected(node->node_id) ? '*' : ' ', node->node_id);
   (void)snprintf(text->last_seen, sizeof(text->last_seen), "%5lu.%05lu",
                  (unsigned long)(node->last_seen_us / 1000000U),
                  (unsigned long)((node->last_seen_us / 10U) % 100000U));
@@ -782,6 +887,27 @@ static void Render_NodeRows(void)
     }
     lv_obj_set_y(node_open_buttons[row], y - 3);
   }
+}
+
+static void Log_NodeToggleClicked(lv_event_t *event)
+{
+  uint32_t row = (uint32_t)(uintptr_t)lv_event_get_user_data(event);
+  int32_t scroll_y = lv_obj_get_scroll_y(nodes_table_body);
+  uint32_t index;
+  uint8_t node_id;
+
+  if (scroll_y < 0)
+  {
+    scroll_y = 0;
+  }
+  index = ((uint32_t)scroll_y / UI_NODE_ROW_HEIGHT) + row;
+  if (index >= node_snapshot_count)
+  {
+    return;
+  }
+  node_id = node_snapshot[index].node_id;
+  CanLogger_SetNodeSelected(node_id, !CanLogger_IsNodeSelected(node_id));
+  Render_NodeRows();
 }
 
 static void Refresh_NodesSnapshot(void)
@@ -1267,6 +1393,78 @@ static void Events_TableScrolled(lv_event_t *event)
   }
 }
 
+static void Refresh_LogStatus(void)
+{
+  CanLogStatus status;
+  char text[128];
+  uint64_t size_kib;
+  uint64_t free_mib;
+  bool logging_active;
+
+  CanLogger_GetStatus(&status);
+  logging_active = status.mode != CAN_LOG_MODE_OFF;
+  if (logging_active)
+  {
+    quick_log_mode = status.mode;
+    (void)snprintf(text, sizeof(text), "Mode: %s", CanLogger_ModeName(status.mode));
+  }
+  else
+  {
+    (void)snprintf(text, sizeof(text), "Off (next: %s)",
+                   CanLogger_ModeName(quick_log_mode));
+  }
+  lv_label_set_text(log_mode_button_label, text);
+
+  lv_label_set_text(monitor_log_button_label,
+                    logging_active ? "LOG " LV_SYMBOL_STOP : "LOG " LV_SYMBOL_PLAY);
+  lv_label_set_text(nodes_log_button_label,
+                    logging_active ? "LOG " LV_SYMBOL_STOP : "LOG " LV_SYMBOL_PLAY);
+  lv_obj_set_style_bg_color(monitor_log_button,
+                            lv_color_hex(logging_active ? 0x9E3434 : 0x17698C), 0);
+  lv_obj_set_style_bg_color(nodes_log_button,
+                            lv_color_hex(logging_active ? 0x9E3434 : 0x17698C), 0);
+  lv_obj_set_style_border_color(monitor_log_button,
+                                lv_color_hex(logging_active ? 0xFF9B9B : 0x65C7F7), 0);
+  lv_obj_set_style_border_color(nodes_log_button,
+                                lv_color_hex(logging_active ? 0xFF9B9B : 0x65C7F7), 0);
+
+  (void)snprintf(text, sizeof(text), "Card: %s%s",
+                 CanLogger_CardStateName(status.card_state),
+                 status.last_error != 0 ? "  !" : "");
+  lv_label_set_text(log_card_label, text);
+
+  size_kib = status.file_size_bytes / 1024U;
+  (void)snprintf(text, sizeof(text), "File: %s   %llu.%02llu MiB",
+                 status.file_name[0] != '\0' ? status.file_name : "--",
+                 (unsigned long long)(size_kib / 1024U),
+                 (unsigned long long)(((size_kib % 1024U) * 100U) / 1024U));
+  lv_label_set_text(log_file_label, text);
+
+  free_mib = status.free_bytes / (1024U * 1024U);
+  (void)snprintf(text, sizeof(text), "Free: %llu.%02llu GiB",
+                 (unsigned long long)(free_mib / 1024U),
+                 (unsigned long long)(((free_mib % 1024U) * 100U) / 1024U));
+  lv_label_set_text(log_space_label, text);
+
+  (void)snprintf(text, sizeof(text),
+                 "Stored:%llu  Lost:%llu  Write errors:%lu  Recovery:%lu",
+                 (unsigned long long)status.stored_frames,
+                 (unsigned long long)status.dropped_frames,
+                 (unsigned long)status.write_errors,
+                 (unsigned long)status.recovery_count);
+  lv_label_set_text(log_counters_label, text);
+
+  (void)snprintf(text, sizeof(text), "Selected nodes: %lu",
+                 (unsigned long)status.selected_node_count);
+  lv_label_set_text(log_selection_label, text);
+
+  (void)snprintf(text, sizeof(text), "SD:%s  %s  LOST:%llu",
+                 CanLogger_CardStateName(status.card_state),
+                 CanLogger_ModeName(status.mode),
+                 (unsigned long long)status.dropped_frames);
+  lv_label_set_text(main_storage_label, text);
+}
+
 void Ui_Init(void)
 {
   lv_display_t *display;
@@ -1280,6 +1478,8 @@ void Ui_Init(void)
   lv_obj_t *reset_button;
   lv_obj_t *pause_button;
   lv_obj_t *mode_button;
+  lv_obj_t *log_mode_button;
+  lv_obj_t *clear_nodes_button;
   lv_obj_t *title;
   lv_obj_t *overview;
   lv_obj_t *version;
@@ -1305,12 +1505,15 @@ void Ui_Init(void)
   nodes_screen = lv_obj_create(NULL);
   node_events_screen = lv_obj_create(NULL);
   info_screen = lv_obj_create(NULL);
+  log_screen = lv_obj_create(NULL);
+  nodes_return_screen = main_screen;
   Style_Screen(main_screen);
   Style_Screen(monitor_screen);
   Style_Screen(settings_screen);
   Style_Screen(nodes_screen);
   Style_Screen(node_events_screen);
   Style_Screen(info_screen);
+  Style_Screen(log_screen);
   lv_obj_set_style_text_font(info_screen, &ui_font_cyrillic_14, 0);
 
   title = Create_Label(main_screen, 0, 14, LCD_WIDTH, "CAN Sniffer", lv_color_hex(0x65C7F7));
@@ -1318,12 +1521,54 @@ void Ui_Init(void)
   lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
   main_status_label = Create_Label(main_screen, 20, 42, 440, "CAN starting...", lv_color_hex(0xA9C7D7));
   lv_obj_set_style_text_align(main_status_label, LV_TEXT_ALIGN_CENTER, 0);
-  (void)Create_NavigationButton(main_screen, 24, 72, 208, 150, "CAN\nMonitor", monitor_screen);
-  (void)Create_NavigationButton(main_screen, 248, 72, 208, 150, "Nodes", nodes_screen);
+  (void)Create_NavigationButton(main_screen, 12, 72, 144, 140, "CAN\nMonitor", monitor_screen);
+  (void)Create_NavigationButton(main_screen, 168, 72, 144, 140, "Nodes", nodes_screen);
+  (void)Create_NavigationButton(main_screen, 324, 72, 144, 140, "microSD\nLog", log_screen);
+  main_storage_label = Create_Label(main_screen, 16, 230, 448,
+                                    "SD:No card  Off  LOST:0", lv_color_hex(0xA9C7D7));
+  lv_obj_set_style_text_align(main_storage_label, LV_TEXT_ALIGN_CENTER, 0);
   reset_button = Create_NavigationButton(main_screen, 4, 3, 44, 34, LV_SYMBOL_REFRESH, main_screen);
   lv_obj_add_event_cb(reset_button, Reset_StatisticsClicked, LV_EVENT_CLICKED, NULL);
   (void)Create_NavigationButton(main_screen, 384, 3, 44, 34, "i", info_screen);
   (void)Create_NavigationButton(main_screen, 432, 3, 44, 34, LV_SYMBOL_SETTINGS, settings_screen);
+
+  (void)Create_NavigationButton(log_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
+  title = Create_Label(log_screen, 58, 10, 410, "microSD logging", lv_color_hex(0x65C7F7));
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+  log_mode_button = lv_button_create(log_screen);
+  lv_obj_set_pos(log_mode_button, 16, 50);
+  lv_obj_set_size(log_mode_button, 150, 42);
+  lv_obj_set_style_bg_color(log_mode_button, lv_color_hex(0x17698C), 0);
+  lv_obj_set_style_bg_color(log_mode_button, lv_color_hex(0x238DB8), LV_STATE_PRESSED);
+  lv_obj_set_style_border_color(log_mode_button, lv_color_hex(0x65C7F7), 0);
+  lv_obj_set_style_border_width(log_mode_button, 1, 0);
+  lv_obj_set_style_radius(log_mode_button, 6, 0);
+  lv_obj_set_style_pad_all(log_mode_button, 0, 0);
+  lv_obj_add_event_cb(log_mode_button, Log_ModeClicked, LV_EVENT_CLICKED, NULL);
+  log_mode_button_label = lv_label_create(log_mode_button);
+  lv_label_set_text(log_mode_button_label, "Mode: Off");
+  lv_obj_center(log_mode_button_label);
+  log_card_label = Create_Label(log_screen, 184, 63, 280, "Card: No card",
+                                lv_color_hex(0xE8EEF2));
+  log_file_label = Create_Label(log_screen, 16, 108, 448, "File: --",
+                                lv_color_hex(0xE8EEF2));
+  log_space_label = Create_Label(log_screen, 16, 133, 448, "Free: 0.00 GiB",
+                                 lv_color_hex(0xA9C7D7));
+  log_counters_label = Create_Label(log_screen, 16, 158, 448,
+                                    "Stored:0  Lost:0  Write errors:0  Recovery:0",
+                                    lv_color_hex(0xE8EEF2));
+  log_selection_label = Create_Label(log_screen, 16, 183, 220, "Selected nodes: 0",
+                                     lv_color_hex(0x65C7F7));
+  clear_nodes_button = Create_NavigationButton(log_screen, 16, 207, 116, 46,
+                                               "Clear nodes", log_screen);
+  lv_obj_add_event_cb(clear_nodes_button, Log_ClearNodesClicked, LV_EVENT_CLICKED, NULL);
+  (void)Create_NavigationButton(log_screen, 142, 207, 142, 46,
+                                "Select nodes", nodes_screen);
+  overview = Create_Label(log_screen, 300, 204, 164,
+                          "On Nodes screen tap the node number. '*' means selected.",
+                          lv_color_hex(0xA9C7D7));
+  lv_label_set_long_mode(overview, LV_LABEL_LONG_WRAP);
+  lv_obj_set_height(overview, 58);
 
   (void)Create_NavigationButton(info_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
   title = Create_Label(info_screen, 58, 10, 410, "Информация", lv_color_hex(0x65C7F7));
@@ -1424,10 +1669,13 @@ void Ui_Init(void)
   }
   lv_obj_set_hidden(bitrate_options_panel, true);
 
-  (void)Create_NavigationButton(nodes_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
-  nodes_title_label = Create_Label(nodes_screen, 58, 10, 410, "Nodes  0.00000 s  Unique:0",
+  nodes_back_button = Create_NavigationButton(nodes_screen, 4, 3, 44, 34,
+                                               LV_SYMBOL_HOME, main_screen);
+  nodes_back_button_label = lv_obj_get_child(nodes_back_button, 1);
+  nodes_title_label = Create_Label(nodes_screen, 58, 10, 334, "Nodes  0.00000 s  Unique:0",
                                    lv_color_hex(0x65C7F7));
   lv_obj_set_style_text_font(nodes_title_label, &lv_font_montserrat_14, 0);
+  nodes_log_button = Create_QuickLogButton(nodes_screen, 400, &nodes_log_button_label);
 
   header_panel = lv_obj_create(nodes_screen);
   lv_obj_remove_style_all(header_panel);
@@ -1436,7 +1684,7 @@ void Ui_Init(void)
   lv_obj_set_style_bg_color(header_panel, lv_color_hex(0x17242B), 0);
   lv_obj_set_style_bg_opa(header_panel, LV_OPA_COVER, 0);
   lv_obj_set_scrollable(header_panel, false);
-  (void)Create_TableHeader(header_panel, 2, 34, "Node", Node_HeaderClicked, NODE_SORT_ID);
+  (void)Create_TableHeader(header_panel, 2, 34, "*ID", Node_HeaderClicked, NODE_SORT_ID);
   (void)Create_TableHeader(header_panel, 40, 67, "Last", Node_HeaderClicked, NODE_SORT_LAST_SEEN);
   (void)Create_TableHeader(header_panel, 111, 57, "Frames", Node_HeaderClicked, NODE_SORT_FRAMES);
   (void)Create_TableHeader(header_panel, 172, 56, "Traffic", Node_HeaderClicked, NODE_SORT_TRAFFIC);
@@ -1472,6 +1720,9 @@ void Ui_Init(void)
     int32_t y = (int32_t)(row * UI_NODE_ROW_HEIGHT) + 4;
     Clear_NodeRow(&node_row_text[row]);
     node_cell_labels[row][0] = Create_Label(nodes_table_body, 4, y, 32, "", lv_color_hex(0xE8EEF2));
+    lv_obj_set_clickable(node_cell_labels[row][0], true);
+    lv_obj_add_event_cb(node_cell_labels[row][0], Log_NodeToggleClicked,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)row);
     node_cell_labels[row][1] = Create_Label(nodes_table_body, 40, y, 65, "", lv_color_hex(0xE8EEF2));
     node_cell_labels[row][2] = Create_Label(nodes_table_body, 111, y, 55, "", lv_color_hex(0xE8EEF2));
     node_cell_labels[row][3] = Create_Label(nodes_table_body, 172, y, 54, "", lv_color_hex(0xE8EEF2));
@@ -1610,8 +1861,10 @@ void Ui_Init(void)
   (void)Create_NavigationButton(screen, 4, 1, 42, 34, LV_SYMBOL_HOME, main_screen);
   status_label = lv_label_create(screen);
   lv_obj_set_pos(status_label, 52, 7);
-  lv_obj_set_width(status_label, 366);
+  lv_obj_set_width(status_label, 284);
   lv_label_set_text(status_label, "CAN SCAN 1000 kbit/s");
+
+  monitor_log_button = Create_QuickLogButton(screen, 342, &monitor_log_button_label);
 
   pause_button = lv_button_create(screen);
   lv_obj_set_size(pause_button, 52, 34);
@@ -1706,6 +1959,7 @@ void Ui_Init(void)
   node_object_mode = false;
   deep_sdo_mode = false;
   rows_dirty = false;
+  Refresh_LogStatus();
   lv_screen_load(main_screen);
 }
 
@@ -1755,7 +2009,7 @@ void Ui_TaskLoop(void)
             ((status.state == CAN_SYNC_MANUAL) ? "MAN" : "SCAN");
     drops = status.ring_overflows + status.gui_overflows +
             CanopenAnalyzer_GetQueueOverflows();
-    (void)snprintf(text, sizeof(text), "CAN %s%s %lu k  RX:%lu  DROP:%lu  ERR:%lu",
+    (void)snprintf(text, sizeof(text), "CAN %s%s %luk RX:%lu D:%lu E:%lu",
                    display_paused ? "PAUSE/" : "", state, (unsigned long)status.bitrate_kbps,
                    (unsigned long)status.received,
                    (unsigned long)drops,
@@ -1769,6 +2023,7 @@ void Ui_TaskLoop(void)
                    (unsigned long)status.errors);
     lv_label_set_text(status_label, text);
     lv_label_set_text(main_status_label, main_text);
+    Refresh_LogStatus();
     last_status_update = now;
   }
 
