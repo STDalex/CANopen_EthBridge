@@ -128,6 +128,8 @@ static lv_obj_t *status_label;
 static lv_obj_t *main_status_label;
 static lv_obj_t *main_storage_label;
 static lv_obj_t *pause_button_label;
+static lv_obj_t *main_log_button;
+static lv_obj_t *main_log_button_label;
 static lv_obj_t *monitor_log_button;
 static lv_obj_t *monitor_log_button_label;
 static lv_obj_t *nodes_log_button;
@@ -179,7 +181,8 @@ static lv_obj_t *bitrate_selector_label;
 static lv_obj_t *bitrate_options_panel;
 static lv_obj_t *deep_sdo_button_label;
 static bool deep_sdo_mode;
-static lv_obj_t *log_mode_button_label;
+static lv_obj_t *log_full_radio;
+static lv_obj_t *log_nodes_radio;
 static lv_obj_t *log_card_label;
 static lv_obj_t *log_file_label;
 static lv_obj_t *log_space_label;
@@ -312,21 +315,22 @@ static void DeepSdo_ModeClicked(lv_event_t *event)
   }
 }
 
-static void Log_ModeClicked(lv_event_t *event)
+static void Log_ModeSelected(lv_event_t *event)
 {
-  CanLogMode mode = CanLogger_GetMode();
-  (void)event;
-  if (mode != CAN_LOG_MODE_OFF)
+  CanLogMode selected_mode = (CanLogMode)(uintptr_t)lv_event_get_user_data(event);
+  CanLogMode active_mode = CanLogger_GetMode();
+
+  if ((selected_mode != CAN_LOG_MODE_FULL) &&
+      (selected_mode != CAN_LOG_MODE_SELECTED))
   {
-    quick_log_mode = mode;
+    return;
   }
-  mode = (mode == CAN_LOG_MODE_OFF) ? CAN_LOG_MODE_FULL :
-         ((mode == CAN_LOG_MODE_FULL) ? CAN_LOG_MODE_SELECTED : CAN_LOG_MODE_OFF);
-  if (mode != CAN_LOG_MODE_OFF)
+
+  quick_log_mode = selected_mode;
+  if (active_mode != CAN_LOG_MODE_OFF)
   {
-    quick_log_mode = mode;
+    CanLogger_SetMode(selected_mode);
   }
-  CanLogger_SetMode(mode);
   Refresh_LogStatus();
 }
 
@@ -483,6 +487,30 @@ static lv_obj_t *Create_QuickLogButton(lv_obj_t *parent, int32_t x,
   lv_label_set_text(*label, "LOG " LV_SYMBOL_PLAY);
   lv_obj_center(*label);
   return button;
+}
+
+static lv_obj_t *Create_LogModeRadio(lv_obj_t *parent, int32_t x,
+                                     const char *text, CanLogMode mode)
+{
+  lv_obj_t *radio = lv_checkbox_create(parent);
+
+  lv_obj_set_pos(radio, x, 55);
+  lv_obj_set_size(radio, 86, 32);
+  lv_checkbox_set_text_static(radio, text);
+  lv_obj_set_style_text_color(radio, lv_color_hex(0xE8EEF2), 0);
+  lv_obj_set_style_pad_column(radio, 6, 0);
+  lv_obj_set_style_radius(radio, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+  lv_obj_set_style_border_width(radio, 2, LV_PART_INDICATOR);
+  lv_obj_set_style_border_color(radio, lv_color_hex(0x65C7F7), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(radio, lv_color_hex(0x101418), LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(radio, LV_OPA_COVER, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_color(radio, lv_color_hex(0x238DB8),
+                            LV_PART_INDICATOR | LV_STATE_CHECKED);
+  lv_obj_set_style_border_color(radio, lv_color_hex(0xA6E2FF),
+                                LV_PART_INDICATOR | LV_STATE_CHECKED);
+  lv_obj_add_event_cb(radio, Log_ModeSelected, LV_EVENT_CLICKED,
+                      (void *)(uintptr_t)mode);
+  return radio;
 }
 
 static void Info_ModeClicked(lv_event_t *event)
@@ -1406,19 +1434,26 @@ static void Refresh_LogStatus(void)
   if (logging_active)
   {
     quick_log_mode = status.mode;
-    (void)snprintf(text, sizeof(text), "Mode: %s", CanLogger_ModeName(status.mode));
+  }
+  if (quick_log_mode == CAN_LOG_MODE_SELECTED)
+  {
+    lv_obj_remove_state(log_full_radio, LV_STATE_CHECKED);
+    lv_obj_add_state(log_nodes_radio, LV_STATE_CHECKED);
   }
   else
   {
-    (void)snprintf(text, sizeof(text), "Off (next: %s)",
-                   CanLogger_ModeName(quick_log_mode));
+    lv_obj_add_state(log_full_radio, LV_STATE_CHECKED);
+    lv_obj_remove_state(log_nodes_radio, LV_STATE_CHECKED);
   }
-  lv_label_set_text(log_mode_button_label, text);
 
   lv_label_set_text(monitor_log_button_label,
                     logging_active ? "LOG " LV_SYMBOL_STOP : "LOG " LV_SYMBOL_PLAY);
   lv_label_set_text(nodes_log_button_label,
                     logging_active ? "LOG " LV_SYMBOL_STOP : "LOG " LV_SYMBOL_PLAY);
+  lv_label_set_text(main_log_button_label,
+                    logging_active ? "LOG " LV_SYMBOL_STOP : "LOG " LV_SYMBOL_PLAY);
+  lv_obj_set_style_bg_color(main_log_button,
+                            lv_color_hex(logging_active ? 0x9E3434 : 0x17698C), 0);
   lv_obj_set_style_bg_color(monitor_log_button,
                             lv_color_hex(logging_active ? 0x9E3434 : 0x17698C), 0);
   lv_obj_set_style_bg_color(nodes_log_button,
@@ -1426,6 +1461,8 @@ static void Refresh_LogStatus(void)
   lv_obj_set_style_border_color(monitor_log_button,
                                 lv_color_hex(logging_active ? 0xFF9B9B : 0x65C7F7), 0);
   lv_obj_set_style_border_color(nodes_log_button,
+                                lv_color_hex(logging_active ? 0xFF9B9B : 0x65C7F7), 0);
+  lv_obj_set_style_border_color(main_log_button,
                                 lv_color_hex(logging_active ? 0xFF9B9B : 0x65C7F7), 0);
 
   (void)snprintf(text, sizeof(text), "Card: %s%s",
@@ -1478,7 +1515,6 @@ void Ui_Init(void)
   lv_obj_t *reset_button;
   lv_obj_t *pause_button;
   lv_obj_t *mode_button;
-  lv_obj_t *log_mode_button;
   lv_obj_t *clear_nodes_button;
   lv_obj_t *title;
   lv_obj_t *overview;
@@ -1529,26 +1565,18 @@ void Ui_Init(void)
   lv_obj_set_style_text_align(main_storage_label, LV_TEXT_ALIGN_CENTER, 0);
   reset_button = Create_NavigationButton(main_screen, 4, 3, 44, 34, LV_SYMBOL_REFRESH, main_screen);
   lv_obj_add_event_cb(reset_button, Reset_StatisticsClicked, LV_EVENT_CLICKED, NULL);
+  main_log_button = Create_QuickLogButton(main_screen, 304, &main_log_button_label);
   (void)Create_NavigationButton(main_screen, 384, 3, 44, 34, "i", info_screen);
   (void)Create_NavigationButton(main_screen, 432, 3, 44, 34, LV_SYMBOL_SETTINGS, settings_screen);
 
   (void)Create_NavigationButton(log_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
   title = Create_Label(log_screen, 58, 10, 410, "microSD logging", lv_color_hex(0x65C7F7));
   lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
-  log_mode_button = lv_button_create(log_screen);
-  lv_obj_set_pos(log_mode_button, 16, 50);
-  lv_obj_set_size(log_mode_button, 150, 42);
-  lv_obj_set_style_bg_color(log_mode_button, lv_color_hex(0x17698C), 0);
-  lv_obj_set_style_bg_color(log_mode_button, lv_color_hex(0x238DB8), LV_STATE_PRESSED);
-  lv_obj_set_style_border_color(log_mode_button, lv_color_hex(0x65C7F7), 0);
-  lv_obj_set_style_border_width(log_mode_button, 1, 0);
-  lv_obj_set_style_radius(log_mode_button, 6, 0);
-  lv_obj_set_style_pad_all(log_mode_button, 0, 0);
-  lv_obj_add_event_cb(log_mode_button, Log_ModeClicked, LV_EVENT_CLICKED, NULL);
-  log_mode_button_label = lv_label_create(log_mode_button);
-  lv_label_set_text(log_mode_button_label, "Mode: Off");
-  lv_obj_center(log_mode_button_label);
-  log_card_label = Create_Label(log_screen, 184, 63, 280, "Card: No card",
+  (void)Create_Label(log_screen, 16, 64, 46, "Mode:", lv_color_hex(0xA9C7D7));
+  log_full_radio = Create_LogModeRadio(log_screen, 64, "Full", CAN_LOG_MODE_FULL);
+  log_nodes_radio = Create_LogModeRadio(log_screen, 146, "Nodes",
+                                        CAN_LOG_MODE_SELECTED);
+  log_card_label = Create_Label(log_screen, 244, 63, 220, "Card: No card",
                                 lv_color_hex(0xE8EEF2));
   log_file_label = Create_Label(log_screen, 16, 108, 448, "File: --",
                                 lv_color_hex(0xE8EEF2));
