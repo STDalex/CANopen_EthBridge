@@ -15,6 +15,9 @@ clang -std=c11 -Wall -Wextra -I../Core/Inc test_canopen_decoder.c ../Core/Src/ca
 `test_cansniff_converter.py` проверяет декодирование Standard Data и Extended
 Remote кадров, timestamps, CANopen-поля и обнаружение ошибки CRC в `.CSL`.
 
+`test_device_settings.c` проверяет безопасные сетевые значения по умолчанию,
+парсинг IPv4 и отклонение некорректных адресов, масок и шлюзов.
+
 Запуск Python-тестов из каталога `CAN_sniffer`:
 
 ```text

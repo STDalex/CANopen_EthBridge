@@ -6,6 +6,7 @@
 #include "ff.h"
 #include "memory_layout.h"
 #include "queue.h"
+#include "semphr.h"
 #include "sdmmc.h"
 #include "task.h"
 
@@ -42,6 +43,15 @@ typedef enum
 
 typedef enum
 {
+  CAN_LOG_REQUEST_LIST = 0,
+  CAN_LOG_REQUEST_DOWNLOAD_OPEN,
+  CAN_LOG_REQUEST_DOWNLOAD_SEEK,
+  CAN_LOG_REQUEST_DOWNLOAD_READ,
+  CAN_LOG_REQUEST_DOWNLOAD_CLOSE
+} CanLogRequestType;
+
+typedef enum
+{
   CAN_LOG_CLOSE_STOPPED = 0,
   CAN_LOG_CLOSE_ROTATED = 1,
   CAN_LOG_CLOSE_RECOVERED = 2,
@@ -69,6 +79,16 @@ typedef struct
 
 typedef struct
 {
+  uint32_t sequence;
+  uint8_t type;
+  uint8_t reserved[3];
+  uint64_t offset;
+  uint32_t length;
+  char path[72];
+} CanLogRequest;
+
+typedef struct
+{
   CanLogMode mode;
   uint32_t generation;
   uint8_t node_filter[16];
@@ -92,6 +112,24 @@ static StaticQueue_t free_queue_control;
 static QueueHandle_t free_queue;
 static StaticQueue_t ready_queue_control;
 static QueueHandle_t ready_queue;
+static StaticQueue_t request_queue_control;
+static QueueHandle_t request_queue;
+static uint8_t request_queue_storage[sizeof(CanLogRequest)];
+static StaticSemaphore_t request_mutex_control;
+static SemaphoreHandle_t request_mutex;
+static StaticSemaphore_t request_done_control;
+static SemaphoreHandle_t request_done;
+static TaskHandle_t storage_task_handle;
+static CanLogFileInfo *const request_files =
+  (CanLogFileInfo *)CAN_LOG_LIST_BUFFER_BASE;
+static volatile uint32_t request_sequence;
+static volatile uint32_t response_sequence;
+static volatile uint32_t response_count;
+static volatile uint64_t response_size;
+static volatile int32_t response_error;
+static volatile bool response_success;
+static uint8_t *const download_buffer =
+  (uint8_t *)CAN_LOG_DOWNLOAD_BUFFER_BASE;
 
 static CanLogBlockMeta block_meta[CAN_LOG_BLOCK_COUNT];
 static volatile CanLogMode requested_mode;
@@ -108,8 +146,10 @@ static bool producer_session_origin_valid;
 
 static FATFS storage_fs;
 static FIL storage_file;
+static FIL storage_download_file;
 static bool storage_mounted;
 static bool storage_file_open;
+static bool storage_download_open;
 static CanLogConfiguration storage_configuration;
 static char storage_session_path[48];
 static char storage_temp_path[72];
@@ -282,6 +322,10 @@ static bool QueueCurrentProducerBlock(void)
     (void)xQueueSend(free_queue, &index, 0U);
     return false;
   }
+  if (storage_task_handle != NULL)
+  {
+    xTaskNotifyGive(storage_task_handle);
+  }
   return true;
 }
 
@@ -292,7 +336,15 @@ static bool QueueConfiguration(const CanLogConfiguration *configuration)
   item.mode = (uint8_t)configuration->mode;
   item.generation = configuration->generation;
   memcpy(item.node_filter, configuration->node_filter, sizeof(item.node_filter));
-  return xQueueSend(ready_queue, &item, 0U) == pdPASS;
+  if (xQueueSend(ready_queue, &item, 0U) != pdPASS)
+  {
+    return false;
+  }
+  if (storage_task_handle != NULL)
+  {
+    xTaskNotifyGive(storage_task_handle);
+  }
+  return true;
 }
 
 static bool AllocateProducerBlock(uint64_t timestamp_us)
@@ -323,6 +375,10 @@ void CanLogger_Init(void)
   ready_queue = xQueueCreateStatic(CAN_LOG_QUEUE_LENGTH, sizeof(CanLogQueueItem),
                                    (uint8_t *)CAN_LOG_READY_QUEUE_STORAGE_BASE,
                                    &ready_queue_control);
+  request_queue = xQueueCreateStatic(1U, sizeof(CanLogRequest), request_queue_storage,
+                                     &request_queue_control);
+  request_mutex = xSemaphoreCreateMutexStatic(&request_mutex_control);
+  request_done = xSemaphoreCreateBinaryStatic(&request_done_control);
   for (index = 0U; index < CAN_LOG_BLOCK_COUNT; ++index)
   {
     (void)xQueueSend(free_queue, &index, 0U);
@@ -338,6 +394,188 @@ void CanLogger_Init(void)
   producer_mode = CAN_LOG_MODE_OFF;
   producer_generation = 0U;
   producer_session_origin_valid = false;
+  request_sequence = 0U;
+  response_sequence = 0U;
+  response_count = 0U;
+  response_size = 0U;
+  response_error = 0;
+  response_success = false;
+  storage_task_handle = NULL;
+}
+
+static bool ExecuteStorageRequest(CanLogRequest *request, uint32_t timeout_ms)
+{
+  TickType_t started = xTaskGetTickCount();
+  TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+
+  while (xSemaphoreTake(request_done, 0U) == pdTRUE)
+  {
+  }
+  taskENTER_CRITICAL();
+  request->sequence = ++request_sequence;
+  taskEXIT_CRITICAL();
+  if (xQueueSend(request_queue, request, 0U) != pdPASS)
+  {
+    return false;
+  }
+  if (storage_task_handle != NULL)
+  {
+    xTaskNotifyGive(storage_task_handle);
+  }
+  for (;;)
+  {
+    TickType_t elapsed = xTaskGetTickCount() - started;
+    TickType_t remaining = elapsed < timeout ? timeout - elapsed : 0U;
+    if (xSemaphoreTake(request_done, remaining) != pdTRUE)
+    {
+      return false;
+    }
+    if (response_sequence == request->sequence)
+    {
+      return true;
+    }
+  }
+}
+
+bool CanLogger_GetLogList(CanLogFileInfo *files, uint32_t capacity,
+                          uint32_t *count, uint32_t timeout_ms)
+{
+  CanLogRequest request = {0};
+  bool success = false;
+
+  if ((files == NULL) || (count == NULL) || (capacity == 0U))
+  {
+    return false;
+  }
+  *count = 0U;
+  if (capacity > CAN_LOG_LIST_MAX)
+  {
+    capacity = CAN_LOG_LIST_MAX;
+  }
+  if (xSemaphoreTake(request_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+  {
+    return false;
+  }
+  request.type = CAN_LOG_REQUEST_LIST;
+  if (ExecuteStorageRequest(&request, timeout_ms))
+  {
+    uint32_t available = response_count;
+    if (available > capacity)
+    {
+      available = capacity;
+    }
+    memcpy(files, request_files, available * sizeof(files[0]));
+    *count = available;
+    success = response_success;
+  }
+  (void)xSemaphoreGive(request_mutex);
+  return success;
+}
+
+CanLogDownloadResult CanLogger_DownloadBegin(CanLogDownload *download,
+                                             const char *path,
+                                             uint32_t timeout_ms)
+{
+  CanLogRequest request = {0};
+  CanLogDownloadResult result = CAN_LOG_DOWNLOAD_UNAVAILABLE;
+  size_t path_length;
+  bool responded;
+
+  if ((download == NULL) || (path == NULL))
+  {
+    return CAN_LOG_DOWNLOAD_INVALID_PATH;
+  }
+  memset(download, 0, sizeof(*download));
+  path_length = strlen(path);
+  if ((path_length == 0U) || (path_length >= sizeof(request.path)))
+  {
+    return CAN_LOG_DOWNLOAD_INVALID_PATH;
+  }
+  if (xSemaphoreTake(request_mutex, pdMS_TO_TICKS(timeout_ms)) != pdTRUE)
+  {
+    return CAN_LOG_DOWNLOAD_UNAVAILABLE;
+  }
+  request.type = CAN_LOG_REQUEST_DOWNLOAD_OPEN;
+  memcpy(request.path, path, path_length + 1U);
+  responded = ExecuteStorageRequest(&request, timeout_ms);
+  if (responded && response_success)
+  {
+    download->size_bytes = response_size;
+    download->active = true;
+    return CAN_LOG_DOWNLOAD_OK;
+  }
+  if (!responded)
+  {
+    result = CAN_LOG_DOWNLOAD_UNAVAILABLE;
+  }
+  else if (response_error == (int32_t)FR_INVALID_NAME)
+  {
+    result = CAN_LOG_DOWNLOAD_INVALID_PATH;
+  }
+  else if ((response_error == (int32_t)FR_NO_FILE) ||
+           (response_error == (int32_t)FR_NO_PATH))
+  {
+    result = CAN_LOG_DOWNLOAD_NOT_FOUND;
+  }
+  else if (response_error != (int32_t)FR_NOT_READY)
+  {
+    result = CAN_LOG_DOWNLOAD_IO_ERROR;
+  }
+  (void)xSemaphoreGive(request_mutex);
+  return result;
+}
+
+bool CanLogger_DownloadSeek(CanLogDownload *download, uint64_t offset,
+                            uint32_t timeout_ms)
+{
+  CanLogRequest request = {0};
+  if ((download == NULL) || !download->active ||
+      (offset > download->size_bytes))
+  {
+    return false;
+  }
+  request.type = CAN_LOG_REQUEST_DOWNLOAD_SEEK;
+  request.offset = offset;
+  return ExecuteStorageRequest(&request, timeout_ms) && response_success;
+}
+
+bool CanLogger_DownloadRead(CanLogDownload *download, uint32_t requested,
+                            const uint8_t **data, uint32_t *length,
+                            uint32_t timeout_ms)
+{
+  CanLogRequest request = {0};
+  if ((download == NULL) || !download->active || (data == NULL) ||
+      (length == NULL) || (requested == 0U))
+  {
+    return false;
+  }
+  if (requested > CAN_LOG_DOWNLOAD_BUFFER_BYTES)
+  {
+    requested = CAN_LOG_DOWNLOAD_BUFFER_BYTES;
+  }
+  request.type = CAN_LOG_REQUEST_DOWNLOAD_READ;
+  request.length = requested;
+  if (!ExecuteStorageRequest(&request, timeout_ms) || !response_success)
+  {
+    return false;
+  }
+  *data = download_buffer;
+  *length = response_count;
+  return true;
+}
+
+void CanLogger_DownloadEnd(CanLogDownload *download, uint32_t timeout_ms)
+{
+  CanLogRequest request = {0};
+  if ((download == NULL) || !download->active)
+  {
+    return;
+  }
+  request.type = CAN_LOG_REQUEST_DOWNLOAD_CLOSE;
+  (void)ExecuteStorageRequest(&request, timeout_ms);
+  download->active = false;
+  download->size_bytes = 0U;
+  (void)xSemaphoreGive(request_mutex);
 }
 
 void CanLogger_ProducerPoll(void)
@@ -1078,6 +1316,11 @@ static FRESULT StorageMount(void)
 
 static void StorageUnmount(CanLogCardState state, int32_t error)
 {
+  if (storage_download_open)
+  {
+    (void)f_close(&storage_download_file);
+    storage_download_open = false;
+  }
   storage_file_open = false;
   storage_file_position = 0U;
   storage_file_limit = 0U;
@@ -1670,6 +1913,211 @@ static void HandleBlockItem(uint8_t block_index, uint32_t generation)
   (void)xQueueSend(free_queue, &block_index, portMAX_DELAY);
 }
 
+static bool HasCompletedLogExtension(const char *name)
+{
+  const char *extension = strrchr(name, '.');
+  return (extension != NULL) && (strcmp(extension, ".CSL") == 0);
+}
+
+static bool IsCompletedLogPath(const char *path)
+{
+  static const char prefix[] = "/CANSNIFF/LOGS/";
+  const char *tail;
+  uint32_t index;
+  if ((path == NULL) ||
+      (strncmp(path, prefix, sizeof(prefix) - 1U) != 0))
+  {
+    return false;
+  }
+  tail = path + sizeof(prefix) - 1U;
+  if ((strlen(tail) != 19U) || (tail[0] != 'S') || (tail[7] != '/') ||
+      (tail[8] != 'L') || (strcmp(tail + 15U, ".CSL") != 0))
+  {
+    return false;
+  }
+  for (index = 1U; index <= 6U; ++index)
+  {
+    if ((tail[index] < '0') || (tail[index] > '9'))
+    {
+      return false;
+    }
+  }
+  for (index = 9U; index <= 14U; ++index)
+  {
+    if ((tail[index] < '0') || (tail[index] > '9'))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+static FRESULT BuildCompletedLogList(uint32_t *file_count)
+{
+  DIR root;
+  FILINFO session_info;
+  FRESULT result;
+  uint32_t count = 0U;
+
+  *file_count = 0U;
+  if (!storage_mounted)
+  {
+    return FR_NOT_READY;
+  }
+  result = f_opendir(&root, CAN_LOG_DIRECTORY);
+  if (result != FR_OK)
+  {
+    return result;
+  }
+
+  for (;;)
+  {
+    uint32_t session_id;
+    DIR session;
+    FILINFO file_info;
+    char session_path[48];
+
+    result = f_readdir(&root, &session_info);
+    if ((result != FR_OK) || (session_info.fname[0] == '\0'))
+    {
+      break;
+    }
+    if (((session_info.fattrib & AM_DIR) == 0U) ||
+        !ParseSessionDirectory(session_info.fname, &session_id))
+    {
+      continue;
+    }
+    (void)snprintf(session_path, sizeof(session_path), "%s/%s",
+                   CAN_LOG_DIRECTORY, session_info.fname);
+    result = f_opendir(&session, session_path);
+    if (result != FR_OK)
+    {
+      break;
+    }
+    for (;;)
+    {
+      result = f_readdir(&session, &file_info);
+      if ((result != FR_OK) || (file_info.fname[0] == '\0'))
+      {
+        break;
+      }
+      if (((file_info.fattrib & AM_DIR) != 0U) ||
+          !HasCompletedLogExtension(file_info.fname))
+      {
+        continue;
+      }
+      if (count < CAN_LOG_LIST_MAX)
+      {
+        CanLogFileInfo *destination = &request_files[count++];
+        (void)snprintf(destination->path, sizeof(destination->path),
+                       "/CANSNIFF/LOGS/%s/%s", session_info.fname,
+                       file_info.fname);
+        destination->session_id = session_id;
+        destination->size_bytes = (uint64_t)file_info.fsize;
+      }
+    }
+    (void)f_closedir(&session);
+    if ((result != FR_OK) || (count >= CAN_LOG_LIST_MAX))
+    {
+      break;
+    }
+  }
+  (void)f_closedir(&root);
+  if (result == FR_OK)
+  {
+    *file_count = count;
+  }
+  return result;
+}
+
+static bool HandleStorageRequests(void)
+{
+  CanLogRequest request;
+
+  if (xQueueReceive(request_queue, &request, 0U) == pdPASS)
+  {
+    FRESULT result = FR_OK;
+    uint32_t count = 0U;
+    uint64_t size = 0U;
+
+    if (request.type == CAN_LOG_REQUEST_LIST)
+    {
+      result = BuildCompletedLogList(&count);
+    }
+    else if (request.type == CAN_LOG_REQUEST_DOWNLOAD_OPEN)
+    {
+      char fatfs_path[76];
+      if (storage_download_open)
+      {
+        (void)f_close(&storage_download_file);
+        storage_download_open = false;
+      }
+      if (!storage_mounted)
+      {
+        result = FR_NOT_READY;
+      }
+      else if (!IsCompletedLogPath(request.path))
+      {
+        result = FR_INVALID_NAME;
+      }
+      else
+      {
+        (void)snprintf(fatfs_path, sizeof(fatfs_path), "0:%s", request.path);
+        result = f_open(&storage_download_file, fatfs_path, FA_READ);
+        if (result == FR_OK)
+        {
+          storage_download_open = true;
+          size = (uint64_t)f_size(&storage_download_file);
+        }
+      }
+    }
+    else if (request.type == CAN_LOG_REQUEST_DOWNLOAD_SEEK)
+    {
+      result = storage_download_open ?
+               f_lseek(&storage_download_file, (FSIZE_t)request.offset) :
+               FR_NOT_READY;
+    }
+    else if (request.type == CAN_LOG_REQUEST_DOWNLOAD_READ)
+    {
+      UINT bytes_read = 0U;
+      if (!storage_download_open)
+      {
+        result = FR_NOT_READY;
+      }
+      else
+      {
+        UINT requested = request.length > CAN_LOG_DOWNLOAD_BUFFER_BYTES ?
+                         (UINT)CAN_LOG_DOWNLOAD_BUFFER_BYTES :
+                         (UINT)request.length;
+        result = f_read(&storage_download_file, download_buffer,
+                        requested, &bytes_read);
+        count = bytes_read;
+      }
+    }
+    else if (request.type == CAN_LOG_REQUEST_DOWNLOAD_CLOSE)
+    {
+      if (storage_download_open)
+      {
+        result = f_close(&storage_download_file);
+        storage_download_open = false;
+      }
+    }
+    else
+    {
+      result = FR_INVALID_PARAMETER;
+    }
+
+    response_count = count;
+    response_size = size;
+    response_error = (int32_t)result;
+    response_success = result == FR_OK;
+    response_sequence = request.sequence;
+    (void)xSemaphoreGive(request_done);
+    return true;
+  }
+  return false;
+}
+
 void CanLogger_StorageTask(void)
 {
   CanLogQueueItem item;
@@ -1678,12 +2126,15 @@ void CanLogger_StorageTask(void)
   storage_configuration.mode = CAN_LOG_MODE_OFF;
   storage_mounted = false;
   storage_file_open = false;
+  storage_download_open = false;
+  storage_task_handle = xTaskGetCurrentTaskHandle();
   storage_last_mount_tick = HAL_GetTick() - CAN_LOG_MOUNT_RETRY_MS;
 
   for (;;)
   {
     uint32_t now = HAL_GetTick();
     bool present = StorageSd_CardPresent();
+    bool handled_work = false;
 
     if (!present && storage_mounted)
     {
@@ -1700,8 +2151,9 @@ void CanLogger_StorageTask(void)
       (void)StorageMount();
     }
 
-    if (xQueueReceive(ready_queue, &item, pdMS_TO_TICKS(20U)) == pdPASS)
+    if (xQueueReceive(ready_queue, &item, 0U) == pdPASS)
     {
+      handled_work = true;
       if (item.type == CAN_LOG_ITEM_CONFIGURATION)
       {
         HandleConfigurationItem(&item);
@@ -1710,6 +2162,10 @@ void CanLogger_StorageTask(void)
       {
         HandleBlockItem(item.block_index, item.generation);
       }
+    }
+    else
+    {
+      handled_work = HandleStorageRequests();
     }
 
     if (storage_mounted && !storage_file_open &&
@@ -1742,6 +2198,10 @@ void CanLogger_StorageTask(void)
     {
       storage_last_space_tick = now;
       (void)StorageUpdateFreeSpace();
+    }
+    if (!handled_work)
+    {
+      (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20U));
     }
   }
 }

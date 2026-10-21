@@ -30,7 +30,9 @@
 #include "can_log.h"
 #include "can_pipeline.h"
 #include "canopen_analyzer.h"
+#include "api_server.h"
 #include "memory_layout.h"
+#include "network_service.h"
 #include "ui.h"
 
 /* USER CODE END Includes */
@@ -178,6 +180,7 @@ void MX_FREERTOS_Init(void) {
                                           &analyzerFrameQueueControlBlock);
   CanopenAnalyzer_Init();
   CanLogger_Init();
+  NetworkService_Start();
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -230,6 +233,7 @@ void StartCanRxTask(void const * argument)
     while (CanCapture_Pop(&frame))
     {
       CanLogger_SubmitFrame(&frame);
+      ApiServer_SubmitFrame(&frame);
       if (xQueueSend(analyzerFrameQueue, &frame, 0U) != pdPASS)
       {
         CanopenAnalyzer_AddQueueOverflow();

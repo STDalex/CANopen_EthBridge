@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<?xml version="1.0" encoding="utf-8" standalone="no"?>
 <Project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="project_projx.xsd">
 
   <SchemaVersion>2.1</SchemaVersion>
@@ -340,7 +340,7 @@
               <MiscControls>-Wno-padded -Wno-implicit-int-conversion -Wno-declaration-after-statement -Wno-missing-prototypes -Wno-cast-align -Wno-unused-function -Wno-missing-field-initializers -Wno-sign-conversion -Wno-implicit-fallthrough -Wno-extra-semi-stmt -Wno-newline-eof -Wno-cast-qual -Wno-assign-enum -Wno-switch-enum -Wno-missing-variable-declarations -Wno-unreachable-code-return -Wno-unused-parameter -Wno-missing-noreturn -Wno-disabled-macro-expansion -Wno-covered-switch-default -Wno-shorten-64-to-32 -Wno-invalid-utf8 -Wno-format-nonliteral -Wno-unreachable-code -Wno-bad-function-cast -Wno-comma -Wno-bitfield-enum-conversion -Wno-unreachable-code-break</MiscControls>
               <Define>USE_HAL_DRIVER,STM32F746xx</Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1;../Drivers/CMSIS/Device/ST/STM32F7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/lvgl;../Middlewares/Third_Party/lvgl/include;../Middlewares/Third_Party/FatFs/src</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1;../Drivers/CMSIS/Device/ST/STM32F7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/lvgl;../Middlewares/Third_Party/lvgl/include;../Middlewares/Third_Party/FatFs/src;../Middlewares/Third_Party/LwIP/src/include;../Middlewares/Third_Party/LwIP/system;../Drivers/BSP/STM32746G-Discovery;../Drivers/BSP/Components/lan8742;../Drivers/BSP/Components/n25q128a</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>
@@ -358,11 +358,11 @@
               <MiscControls></MiscControls>
               <Define></Define>
               <Undefine></Undefine>
-              <IncludePath>../Core/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1;../Drivers/CMSIS/Device/ST/STM32F7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/lvgl;../Middlewares/Third_Party/lvgl/include;../Middlewares/Third_Party/FatFs/src</IncludePath>
+              <IncludePath>../Core/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc;../Drivers/STM32F7xx_HAL_Driver/Inc/Legacy;../Middlewares/Third_Party/FreeRTOS/Source/include;../Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS;../Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM7/r0p1;../Drivers/CMSIS/Device/ST/STM32F7xx/Include;../Drivers/CMSIS/Include;../Middlewares/Third_Party/lvgl;../Middlewares/Third_Party/lvgl/include;../Middlewares/Third_Party/FatFs/src;../Middlewares/Third_Party/LwIP/src/include;../Middlewares/Third_Party/LwIP/system;../Drivers/BSP/STM32746G-Discovery;../Drivers/BSP/Components/lan8742;../Drivers/BSP/Components/n25q128a</IncludePath>
             </VariousControls>
           </Aads>
           <LDads>
-            <umfTarg>1</umfTarg>
+            <umfTarg>0</umfTarg>
             <Ropi>0</Ropi>
             <Rwpi>0</Rwpi>
             <noStLib>0</noStLib>
@@ -371,7 +371,7 @@
             <TextAddressRange></TextAddressRange>
             <DataAddressRange></DataAddressRange>
             <pXoBase></pXoBase>
-            <ScatterFile></ScatterFile>
+            <ScatterFile>.\CAN_sniffer.sct</ScatterFile>
             <IncludeLibs></IncludeLibs>
             <IncludeLibsPath></IncludeLibsPath>
             <Misc></Misc>
@@ -499,7 +499,7 @@
               <FileType>1</FileType>
               <FilePath>../Core/Src/stm32f7xx_hal_timebase_tim.c</FilePath>
             </File>
-          </Files>
+          <File><FileName>device_settings.c</FileName><FileType>1</FileType><FilePath>../Core/Src/device_settings.c</FilePath></File><File><FileName>qspi_store.c</FileName><FileType>1</FileType><FilePath>../Core/Src/qspi_store.c</FilePath></File><File><FileName>app_settings.c</FileName><FileType>1</FileType><FilePath>../Core/Src/app_settings.c</FilePath></File><File><FileName>web_assets.c</FileName><FileType>1</FileType><FilePath>../Core/Src/web_assets.c</FilePath></File><File><FileName>network_service.c</FileName><FileType>1</FileType><FilePath>../Core/Src/network_service.c</FilePath></File><File><FileName>api_server.c</FileName><FileType>1</FileType><FilePath>../Core/Src/api_server.c</FilePath></File><File><FileName>ethernetif.c</FileName><FileType>1</FileType><FilePath>../Core/Src/ethernetif.c</FilePath></File><File><FileName>retarget_io.c</FileName><FileType>1</FileType><FilePath>../Core/Src/retarget_io.c</FilePath></File></Files>
         </Group>
         <Group>
           <GroupName>Drivers/STM32F7xx_HAL_Driver</GroupName>
@@ -644,7 +644,7 @@
               <FileType>1</FileType>
               <FilePath>../Drivers/STM32F7xx_HAL_Driver/Src/stm32f7xx_ll_sdmmc.c</FilePath>
             </File>
-          </Files>
+          <File><FileName>stm32f7xx_hal_eth.c</FileName><FileType>1</FileType><FilePath>../Drivers/STM32F7xx_HAL_Driver/Src/stm32f7xx_hal_eth.c</FilePath></File><File><FileName>stm32f7xx_hal_qspi.c</FileName><FileType>1</FileType><FilePath>../Drivers/STM32F7xx_HAL_Driver/Src/stm32f7xx_hal_qspi.c</FilePath></File></Files>
         </Group>
         <Group>
           <GroupName>Drivers/CMSIS</GroupName>
@@ -1949,21 +1949,21 @@
         <Group>
           <GroupName>::CMSIS</GroupName>
         </Group>
-      </Groups>
+      <Group><GroupName>Drivers/BSP</GroupName><Files><File><FileName>stm32746g_discovery_qspi.c</FileName><FileType>1</FileType><FilePath>../Drivers/BSP/STM32746G-Discovery/stm32746g_discovery_qspi.c</FilePath></File><File><FileName>lan8742.c</FileName><FileType>1</FileType><FilePath>../Drivers/BSP/Components/lan8742/lan8742.c</FilePath></File></Files></Group><Group><GroupName>Middlewares/LwIP</GroupName><Files><File><FileName>err.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/api/err.c</FilePath></File><File><FileName>netbuf.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/api/netbuf.c</FilePath></File><File><FileName>api_lib.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/api/api_lib.c</FilePath></File><File><FileName>tcpip.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/api/tcpip.c</FilePath></File><File><FileName>netifapi.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/api/netifapi.c</FilePath></File><File><FileName>api_msg.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/api/api_msg.c</FilePath></File><File><FileName>timeouts.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/timeouts.c</FilePath></File><File><FileName>udp.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/udp.c</FilePath></File><File><FileName>ip.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/ip.c</FilePath></File><File><FileName>def.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/def.c</FilePath></File><File><FileName>raw.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/raw.c</FilePath></File><File><FileName>stats.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/stats.c</FilePath></File><File><FileName>memp.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/memp.c</FilePath></File><File><FileName>init.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/init.c</FilePath></File><File><FileName>sys.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/sys.c</FilePath></File><File><FileName>pbuf.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/pbuf.c</FilePath></File><File><FileName>netif.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/netif.c</FilePath></File><File><FileName>tcp_out.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/tcp_out.c</FilePath></File><File><FileName>tcp.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/tcp.c</FilePath></File><File><FileName>mem.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/mem.c</FilePath></File><File><FileName>inet_chksum.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/inet_chksum.c</FilePath></File><File><FileName>tcp_in.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/tcp_in.c</FilePath></File><File><FileName>ethernet.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/netif/ethernet.c</FilePath></File><File><FileName>etharp.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/ipv4/etharp.c</FilePath></File><File><FileName>icmp.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/ipv4/icmp.c</FilePath></File><File><FileName>ip4.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/ipv4/ip4.c</FilePath></File><File><FileName>ip4_addr.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/ipv4/ip4_addr.c</FilePath></File><File><FileName>ip4_frag.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/ipv4/ip4_frag.c</FilePath></File><File><FileName>dhcp.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/src/core/ipv4/dhcp.c</FilePath></File><File><FileName>sys_arch.c</FileName><FileType>1</FileType><FilePath>../Middlewares/Third_Party/LwIP/system/OS/sys_arch.c</FilePath></File></Files></Group></Groups>
     </Target>
   </Targets>
 
   <RTE>
-    <apis/>
+    <apis />
     <components>
       <component Cclass="CMSIS" Cgroup="CORE" Cvendor="ARM" Cversion="4.3.0" condition="CMSIS Core">
-        <package name="CMSIS" schemaVersion="1.3" url="http://www.keil.com/pack/" vendor="ARM" version="4.5.0"/>
+        <package name="CMSIS" schemaVersion="1.3" url="http://www.keil.com/pack/" vendor="ARM" version="4.5.0" />
         <targetInfos>
-          <targetInfo name="CAN_sniffer"/>
+          <targetInfo name="CAN_sniffer" />
         </targetInfos>
       </component>
     </components>
-    <files/>
+    <files />
   </RTE>
 
 </Project>

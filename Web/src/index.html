@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101720">
+  <title>CanSniff</title>
+  <link rel="stylesheet" href="__CSS__">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">CS</span><span><strong>CanSniff</strong><small>CANopen monitor</small></span></div>
+    <div class="connection"><span id="conn-dot" class="dot"></span><span id="conn-label">Подключение…</span><span id="firmware" class="muted"></span></div>
+  </header>
+
+  <main>
+    <section class="metrics" aria-label="Состояние устройства">
+      <article><span>Скорость CAN</span><strong id="can-rate">—</strong><small id="can-state">ожидание</small></article>
+      <article><span>Загрузка шины</span><strong id="bus-load">—</strong><small><span id="traffic-total">0 кадров</span> · DROP <span id="can-drops">0</span> · ERR <span id="can-errors">0</span></small></article>
+      <article><span>Запись</span><strong id="log-mode">—</strong><small><span id="log-file">нет файла</span> · свободно <span id="log-free">—</span></small></article>
+      <article><span>Live stream</span><strong id="live-rate">0 кадр/с</strong><small><span id="gap-count">0</span> пропущено · <span id="gap-blocks">0</span> разрывов</small></article>
+    </section>
+
+    <nav class="tabs" aria-label="Разделы">
+      <button class="active" data-tab="monitor">Поток</button>
+      <button data-tab="nodes">Ноды <span id="node-count" class="badge">0</span></button>
+      <button data-tab="logs">Логи</button>
+      <button data-tab="settings">Настройки</button>
+      <button id="reset-statistics" class="reset-action" type="button">Сбросить статистику</button>
+    </nav>
+
+    <section id="tab-monitor" class="tab active">
+      <div class="panel toolbar">
+        <label class="search"><span>Поиск</span><input id="frame-search" type="search" placeholder="ID, тип или данные"></label>
+        <label><span>Тип</span><select id="type-filter"><option value="">Все</option></select></label>
+        <label><span>Нода</span><input id="node-filter" type="number" min="1" max="127" placeholder="Все"></label>
+        <button id="pause-stream" class="secondary">Пауза</button>
+        <button id="clear-stream" class="ghost">Очистить</button>
+      </div>
+      <div class="panel table-panel">
+        <div class="table-head frame-grid">
+          <button data-sort="timestamp">Время</button><button data-sort="id">CAN ID</button><span>FMT</span><button data-sort="type">Тип</button>
+          <button data-sort="node">Нода</button><span>SDO index</span><span>DLC</span><span>Данные</span>
+        </div>
+        <div id="frame-viewport" class="virtual-viewport" tabindex="0" aria-label="Поток CAN кадров"><div id="frame-spacer"></div><div id="frame-rows" class="virtual-rows"></div></div>
+        <div class="table-foot"><span id="visible-count">0 кадров</span><span>буфер 5000 · пакетное обновление 10 Гц</span></div>
+      </div>
+    </section>
+
+    <section id="tab-nodes" class="tab">
+      <div class="split">
+        <div class="panel table-panel">
+          <div class="section-title"><div><span class="eyebrow">CANopen</span><h2>Обнаруженные ноды</h2></div><button id="refresh-nodes" class="ghost">Обновить</button></div>
+          <div class="table-head node-grid"><button data-node-sort="node_id">Нода</button><button data-node-sort="last_seen_us">Последний кадр</button><button data-node-sort="frames">Кадры</button><button data-node-sort="traffic">Трафик</button><button data-node-sort="sdo_success">SDO %</button><button data-node-sort="errors">Ошибки</button><button data-node-sort="last_type">Тип</button></div>
+          <div id="node-list" class="node-list empty-state">Ноды пока не обнаружены</div>
+        </div>
+        <aside class="panel node-detail">
+          <div class="section-title"><div><span class="eyebrow">Статистика</span><h2 id="node-title">Выберите ноду</h2></div><button id="toggle-node-log" class="secondary" disabled>В лог</button></div>
+          <div id="node-summary" class="detail-metrics"></div>
+          <div class="subtabs"><button class="active" data-node-view="events">События</button><button data-node-view="objects">SDO объекты</button></div>
+          <div class="event-head event-grid"><span>Время</span><span>Задержка</span><span>CAN ID</span><span>Тип</span><span>Объект</span><span>Sub</span><span>Данные (LSB)</span><span>Статус</span></div>
+          <div id="node-events" class="event-list empty-state">Здесь появятся события выбранной ноды</div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="tab-logs" class="tab">
+      <div id="storage-detail" class="storage-grid" aria-label="Состояние microSD"></div>
+      <div class="panel">
+        <div class="section-title"><div><span class="eyebrow">microSD</span><h2>Завершённые логи</h2></div><button id="refresh-logs" class="secondary">Обновить</button></div>
+        <div id="log-list" class="log-list empty-state">Список логов ещё не загружен</div>
+      </div>
+    </section>
+
+    <section id="tab-settings" class="tab">
+      <div class="settings-grid">
+        <form id="network-form" class="panel form-card">
+          <div><span class="eyebrow">Ethernet</span><h2>Сеть</h2></div>
+          <label class="check"><input id="dhcp-enabled" type="checkbox"><span>DHCP с резервным статическим адресом</span></label>
+          <div class="form-grid"><label>IP<input id="static-ip" required></label><label>Маска<input id="netmask" required></label><label>Шлюз<input id="gateway" required></label><label>HTTP порт<input id="http-port" type="number" min="1" max="65535" required></label><label>Таймаут DHCP, мс<input id="dhcp-timeout" type="number" min="1000" required></label></div>
+          <button type="submit">Сохранить сеть</button>
+        </form>
+        <form id="can-form" class="panel form-card">
+          <div><span class="eyebrow">Classic CAN</span><h2>Шина</h2></div>
+          <label>Скорость<select id="can-bitrate"><option value="0">Авто</option><option>10</option><option>20</option><option>50</option><option>100</option><option>125</option><option>250</option><option>500</option><option>800</option><option>1000</option></select></label>
+          <label class="check"><input id="deep-sdo" type="checkbox"><span>Глубокий анализ SDO</span></label>
+          <button type="submit">Сохранить CAN</button>
+        </form>
+        <form id="logger-form" class="panel form-card">
+          <div><span class="eyebrow">Logger</span><h2>Запись</h2></div>
+          <div id="logger-status" class="logger-status"><span class="dot"></span><span>Запись остановлена</span></div>
+          <label>Режим<select id="logger-mode"><option value="full">Все кадры</option><option value="selected">Выбранные ноды</option></select></label>
+          <label>Ноды через запятую<input id="logger-nodes" placeholder="1, 7, 42"></label>
+          <p class="hint">В режиме «Выбранные ноды» сохраняются кадры отмеченных нод.</p>
+          <div class="record-actions"><button type="submit" class="secondary">Сохранить настройки</button><button id="start-recording" type="button">Начать запись</button><button id="stop-recording" type="button" class="danger">Остановить</button></div>
+        </form>
+      </div>
+    </section>
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="__JS__" defer></script>
+</body>
+</html>

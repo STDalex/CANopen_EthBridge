@@ -1,12 +1,15 @@
 #include "ui.h"
 
 #include "app_version.h"
+#include "app_settings.h"
 #include "can_log.h"
 #include "canopen_analyzer.h"
 #include "can_pipeline.h"
 #include "cmsis_os.h"
 #include "dma2d.h"
 #include "main.h"
+#include "memory_layout.h"
+#include "network_service.h"
 #include "touch_ft5336.h"
 #include "lvgl.h"
 
@@ -42,6 +45,15 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define UI_EVENT_ROW_HEIGHT    19U
 #define UI_EVENT_TABLE_Y       59U
 #define UI_EVENT_TABLE_HEIGHT  (UI_EVENT_VISIBLE_ROWS * UI_EVENT_ROW_HEIGHT)
+
+#define UI_HISTORY_BYTES       (UI_HISTORY_LENGTH * sizeof(CanFrameRecord))
+#define UI_NODE_SNAPSHOT_BYTES (CANOPEN_NODE_COUNT_MAX * sizeof(CanopenNodeSnapshot))
+#define UI_EVENT_SNAPSHOT_BYTES \
+  (CANOPEN_EVENT_SNAPSHOT_MAX * sizeof(CanopenNodeEventSnapshot))
+
+_Static_assert((UI_HISTORY_BYTES + UI_NODE_SNAPSHOT_BYTES + UI_EVENT_SNAPSHOT_BYTES) <=
+               UI_SNAPSHOT_REGION_BYTES,
+               "UI snapshot buffers exceed their external SDRAM region");
 
 typedef struct
 {
@@ -120,6 +132,7 @@ static uint16_t draw_buffer[LCD_WIDTH * UI_DRAW_LINES] __attribute__((aligned(32
 static lv_obj_t *main_screen;
 static lv_obj_t *monitor_screen;
 static lv_obj_t *settings_screen;
+static lv_obj_t *network_screen;
 static lv_obj_t *nodes_screen;
 static lv_obj_t *node_events_screen;
 static lv_obj_t *info_screen;
@@ -138,7 +151,7 @@ static lv_obj_t *table_body;
 static lv_obj_t *history_spacer;
 static lv_obj_t *cell_labels[UI_VISIBLE_ROWS][6];
 static UiRowText row_text[UI_VISIBLE_ROWS];
-static CanFrameRecord history[UI_HISTORY_LENGTH];
+static CanFrameRecord *const history = (CanFrameRecord *)UI_SNAPSHOT_BASE;
 static uint32_t history_write;
 static uint32_t history_count;
 static bool rows_dirty;
@@ -153,7 +166,8 @@ static lv_obj_t *nodes_spacer;
 static lv_obj_t *node_cell_labels[UI_NODE_VISIBLE_ROWS][6];
 static lv_obj_t *node_open_buttons[UI_NODE_VISIBLE_ROWS];
 static UiNodeRowText node_row_text[UI_NODE_VISIBLE_ROWS];
-static CanopenNodeSnapshot node_snapshot[CANOPEN_NODE_COUNT_MAX];
+static CanopenNodeSnapshot *const node_snapshot =
+  (CanopenNodeSnapshot *)(UI_SNAPSHOT_BASE + UI_HISTORY_BYTES);
 static CanopenGlobalSnapshot analyzer_snapshot;
 static uint32_t node_snapshot_count;
 static NodeSortKey node_sort_key;
@@ -168,7 +182,9 @@ static lv_obj_t *node_events_type_header_label;
 static lv_obj_t *nodes_response_header_label;
 static lv_obj_t *event_cell_labels[UI_EVENT_VISIBLE_ROWS][7];
 static UiEventRowText event_row_text[UI_EVENT_VISIBLE_ROWS];
-static CanopenNodeEventSnapshot event_snapshot[CANOPEN_EVENT_SNAPSHOT_MAX];
+static CanopenNodeEventSnapshot *const event_snapshot =
+  (CanopenNodeEventSnapshot *)(UI_SNAPSHOT_BASE + UI_HISTORY_BYTES +
+                               UI_NODE_SNAPSHOT_BYTES);
 static uint32_t event_snapshot_count;
 static uint8_t selected_node_id;
 static EventSortKey event_sort_key;
@@ -181,6 +197,21 @@ static lv_obj_t *bitrate_selector_label;
 static lv_obj_t *bitrate_options_panel;
 static lv_obj_t *deep_sdo_button_label;
 static bool deep_sdo_mode;
+static lv_obj_t *network_dhcp_label;
+static lv_obj_t *network_dhcp_switch;
+static lv_obj_t *network_dhcp_state_label;
+static lv_obj_t *network_ip_label;
+static lv_obj_t *network_ip_textarea;
+static lv_obj_t *network_mask_label;
+static lv_obj_t *network_mask_textarea;
+static lv_obj_t *network_gateway_label;
+static lv_obj_t *network_gateway_textarea;
+static lv_obj_t *network_save_button;
+static lv_obj_t *network_edit_label;
+static lv_obj_t *network_keyboard;
+static lv_obj_t *network_status_label;
+static lv_obj_t *network_active_field;
+static int32_t network_active_field_y;
 static lv_obj_t *log_full_radio;
 static lv_obj_t *log_nodes_radio;
 static lv_obj_t *log_card_label;
@@ -216,6 +247,19 @@ static void Refresh_NodeEventsSnapshot(void);
 static void Render_Rows(void);
 static void Render_NodeRows(void);
 static void Refresh_LogStatus(void);
+
+static const UiBitrateOption *Find_BitrateOption(uint32_t bitrate_kbps)
+{
+  uint32_t option;
+  for (option = 0U; option < (sizeof(bitrate_options) / sizeof(bitrate_options[0])); ++option)
+  {
+    if (bitrate_options[option].bitrate_kbps == bitrate_kbps)
+    {
+      return &bitrate_options[option];
+    }
+  }
+  return &bitrate_options[0];
+}
 
 static void Cache_Clean(const void *address, uint32_t size)
 {
@@ -292,6 +336,7 @@ static void Bitrate_OptionClicked(lv_event_t *event)
   {
     lv_label_set_text(bitrate_selector_label, option->selector_text);
     CanControl_RequestBitrate(option->bitrate_kbps);
+    (void)AppSettings_UpdateCan(option->bitrate_kbps, deep_sdo_mode, true);
   }
   lv_obj_set_hidden(bitrate_options_panel, true);
   lv_obj_invalidate(settings_screen);
@@ -301,6 +346,11 @@ static void DeepSdo_ModeClicked(lv_event_t *event)
 {
   (void)event;
   deep_sdo_mode = !deep_sdo_mode;
+  {
+    DeviceSettings settings;
+    AppSettings_Get(&settings);
+    (void)AppSettings_UpdateCan(settings.can_bitrate_kbps, deep_sdo_mode, true);
+  }
   lv_label_set_text(deep_sdo_button_label, deep_sdo_mode ? "[X] Deep" : "[ ] Basic");
   lv_label_set_text(nodes_response_header_label, deep_sdo_mode ? "OK %" : "SDO %");
   lv_label_set_text(node_events_type_header_label,
@@ -313,6 +363,167 @@ static void DeepSdo_ModeClicked(lv_event_t *event)
   {
     Refresh_NodeEventsSnapshot();
   }
+}
+
+static void Settings_ScreenLoaded(lv_event_t *event)
+{
+  DeviceSettings settings;
+  const UiBitrateOption *option;
+  (void)event;
+
+  AppSettings_Get(&settings);
+  option = Find_BitrateOption(settings.can_bitrate_kbps);
+  deep_sdo_mode = settings.deep_sdo_enabled;
+  lv_label_set_text(bitrate_selector_label, option->selector_text);
+  lv_label_set_text(deep_sdo_button_label, deep_sdo_mode ? "[X] Deep" : "[ ] Basic");
+}
+
+static void Network_UpdateDhcpLabel(void)
+{
+  lv_label_set_text(network_dhcp_state_label,
+                    lv_obj_has_state(network_dhcp_switch, LV_STATE_CHECKED) ? "ON" : "OFF");
+}
+
+static void Network_DhcpChanged(lv_event_t *event)
+{
+  (void)event;
+  Network_UpdateDhcpLabel();
+}
+
+static void Network_EndEditing(void)
+{
+  if (network_active_field != NULL)
+  {
+    lv_obj_set_y(network_active_field, network_active_field_y);
+    network_active_field = NULL;
+  }
+
+  lv_keyboard_set_textarea(network_keyboard, NULL);
+  lv_obj_set_hidden(network_keyboard, true);
+  lv_obj_set_hidden(network_edit_label, true);
+  lv_obj_set_hidden(network_dhcp_label, false);
+  lv_obj_set_hidden(network_dhcp_switch, false);
+  lv_obj_set_hidden(network_dhcp_state_label, false);
+  lv_obj_set_hidden(network_ip_label, false);
+  lv_obj_set_hidden(network_ip_textarea, false);
+  lv_obj_set_hidden(network_mask_label, false);
+  lv_obj_set_hidden(network_mask_textarea, false);
+  lv_obj_set_hidden(network_gateway_label, false);
+  lv_obj_set_hidden(network_gateway_textarea, false);
+  lv_obj_set_hidden(network_save_button, false);
+  lv_obj_set_hidden(network_status_label, false);
+}
+
+static void Network_ScreenLoaded(lv_event_t *event)
+{
+  DeviceSettings settings;
+  char text[20];
+  (void)event;
+
+  Network_EndEditing();
+  AppSettings_Get(&settings);
+  if (settings.network.dhcp_enabled)
+  {
+    lv_obj_add_state(network_dhcp_switch, LV_STATE_CHECKED);
+  }
+  else
+  {
+    lv_obj_remove_state(network_dhcp_switch, LV_STATE_CHECKED);
+  }
+  Network_UpdateDhcpLabel();
+  DeviceSettings_FormatIpv4(&settings.network.static_ip, text, sizeof(text));
+  lv_textarea_set_text(network_ip_textarea, text);
+  DeviceSettings_FormatIpv4(&settings.network.netmask, text, sizeof(text));
+  lv_textarea_set_text(network_mask_textarea, text);
+  DeviceSettings_FormatIpv4(&settings.network.gateway, text, sizeof(text));
+  lv_textarea_set_text(network_gateway_textarea, text);
+  lv_label_set_text(network_status_label, "Edit and press Save");
+}
+
+static void Network_FieldClicked(lv_event_t *event)
+{
+  lv_obj_t *textarea = lv_event_get_target_obj(event);
+
+  if (network_active_field != textarea)
+  {
+    Network_EndEditing();
+    network_active_field = textarea;
+    network_active_field_y = lv_obj_get_y(textarea);
+  }
+
+  if (textarea == network_ip_textarea)
+  {
+    lv_label_set_text(network_edit_label, "Static IP");
+  }
+  else if (textarea == network_mask_textarea)
+  {
+    lv_label_set_text(network_edit_label, "Netmask");
+  }
+  else
+  {
+    lv_label_set_text(network_edit_label, "Gateway");
+  }
+
+  lv_obj_set_hidden(network_dhcp_label, true);
+  lv_obj_set_hidden(network_dhcp_switch, true);
+  lv_obj_set_hidden(network_dhcp_state_label, true);
+  lv_obj_set_hidden(network_ip_label, true);
+  lv_obj_set_hidden(network_mask_label, true);
+  lv_obj_set_hidden(network_gateway_label, true);
+  lv_obj_set_hidden(network_ip_textarea, textarea != network_ip_textarea);
+  lv_obj_set_hidden(network_mask_textarea, textarea != network_mask_textarea);
+  lv_obj_set_hidden(network_gateway_textarea, textarea != network_gateway_textarea);
+  lv_obj_set_hidden(network_save_button, true);
+  lv_obj_set_hidden(network_status_label, true);
+  lv_obj_set_hidden(network_edit_label, false);
+  lv_obj_set_pos(textarea, 126, 43);
+  lv_keyboard_set_textarea(network_keyboard, textarea);
+  lv_obj_set_hidden(network_keyboard, false);
+  lv_obj_move_foreground(network_keyboard);
+}
+
+static void Network_KeyboardEvent(lv_event_t *event)
+{
+  lv_event_code_t code = lv_event_get_code(event);
+  if ((code == LV_EVENT_READY) || (code == LV_EVENT_CANCEL))
+  {
+    Network_EndEditing();
+  }
+}
+
+static void Network_ScreenUnloaded(lv_event_t *event)
+{
+  (void)event;
+  Network_EndEditing();
+}
+
+static void Network_SaveClicked(lv_event_t *event)
+{
+  DeviceSettings settings;
+  NetworkSettings network;
+  (void)event;
+
+  AppSettings_Get(&settings);
+  network = settings.network;
+  network.dhcp_enabled = lv_obj_has_state(network_dhcp_switch, LV_STATE_CHECKED);
+  if (!DeviceSettings_ParseIpv4(lv_textarea_get_text(network_ip_textarea), &network.static_ip) ||
+      !DeviceSettings_ParseIpv4(lv_textarea_get_text(network_mask_textarea), &network.netmask) ||
+      !DeviceSettings_ParseIpv4(lv_textarea_get_text(network_gateway_textarea), &network.gateway) ||
+      !DeviceSettings_IsValidNetwork(&network))
+  {
+    lv_label_set_text(network_status_label, "Invalid IP configuration");
+    lv_obj_set_style_text_color(network_status_label, lv_color_hex(0xFF7A7A), 0);
+    return;
+  }
+  if (!AppSettings_UpdateNetwork(&network, true))
+  {
+    lv_label_set_text(network_status_label, "QSPI write failed");
+    lv_obj_set_style_text_color(network_status_label, lv_color_hex(0xFF7A7A), 0);
+    return;
+  }
+  NetworkService_RequestApply();
+  lv_label_set_text(network_status_label, "Saved; network is reconfiguring");
+  lv_obj_set_style_text_color(network_status_label, lv_color_hex(0x65C7F7), 0);
 }
 
 static void Log_ModeSelected(lv_event_t *event)
@@ -1504,6 +1715,8 @@ static void Refresh_LogStatus(void)
 
 void Ui_Init(void)
 {
+  DeviceSettings initial_settings;
+  const UiBitrateOption *initial_bitrate;
   lv_display_t *display;
   lv_indev_t *touch;
   lv_obj_t *screen;
@@ -1523,6 +1736,10 @@ void Ui_Init(void)
   uint32_t row;
   uint32_t line;
 
+  AppSettings_Get(&initial_settings);
+  initial_bitrate = Find_BitrateOption(initial_settings.can_bitrate_kbps);
+  deep_sdo_mode = initial_settings.deep_sdo_enabled;
+
   lv_init();
   lv_tick_set_cb(HAL_GetTick);
 
@@ -1538,6 +1755,7 @@ void Ui_Init(void)
   main_screen = lv_screen_active();
   monitor_screen = lv_obj_create(NULL);
   settings_screen = lv_obj_create(NULL);
+  network_screen = lv_obj_create(NULL);
   nodes_screen = lv_obj_create(NULL);
   node_events_screen = lv_obj_create(NULL);
   info_screen = lv_obj_create(NULL);
@@ -1546,6 +1764,9 @@ void Ui_Init(void)
   Style_Screen(main_screen);
   Style_Screen(monitor_screen);
   Style_Screen(settings_screen);
+  Style_Screen(network_screen);
+  lv_obj_set_scrollable(network_screen, false);
+  lv_obj_set_scrollbar_mode(network_screen, LV_SCROLLBAR_MODE_OFF);
   Style_Screen(nodes_screen);
   Style_Screen(node_events_screen);
   Style_Screen(info_screen);
@@ -1641,7 +1862,7 @@ void Ui_Init(void)
   lv_obj_set_style_pad_all(bitrate_selector, 0, 0);
   lv_obj_add_event_cb(bitrate_selector, Bitrate_SelectorClicked, LV_EVENT_CLICKED, NULL);
   bitrate_selector_label = lv_label_create(bitrate_selector);
-  lv_label_set_text(bitrate_selector_label, bitrate_options[0].selector_text);
+  lv_label_set_text(bitrate_selector_label, initial_bitrate->selector_text);
   lv_obj_set_style_text_color(bitrate_selector_label, lv_color_hex(0xF4FAFD), 0);
   lv_obj_center(bitrate_selector_label);
 
@@ -1658,7 +1879,7 @@ void Ui_Init(void)
   lv_obj_set_style_pad_all(deep_sdo_button, 0, 0);
   lv_obj_add_event_cb(deep_sdo_button, DeepSdo_ModeClicked, LV_EVENT_CLICKED, NULL);
   deep_sdo_button_label = lv_label_create(deep_sdo_button);
-  lv_label_set_text(deep_sdo_button_label, "[ ] Basic");
+  lv_label_set_text(deep_sdo_button_label, deep_sdo_mode ? "[X] Deep" : "[ ] Basic");
   lv_obj_set_style_text_color(deep_sdo_button_label, lv_color_hex(0xF4FAFD), 0);
   lv_obj_center(deep_sdo_button_label);
 
@@ -1696,6 +1917,103 @@ void Ui_Init(void)
     lv_obj_center(bitrate_option_label);
   }
   lv_obj_set_hidden(bitrate_options_panel, true);
+
+  (void)Create_NavigationButton(settings_screen, 174, 192, 180, 46,
+                                "Network settings", network_screen);
+  lv_obj_add_event_cb(settings_screen, Settings_ScreenLoaded,
+                      LV_EVENT_SCREEN_LOADED, NULL);
+
+  (void)Create_NavigationButton(network_screen, 4, 3, 44, 34,
+                                LV_SYMBOL_LEFT, settings_screen);
+  title = Create_Label(network_screen, 58, 10, 410, "Ethernet / IPv4",
+                       lv_color_hex(0x65C7F7));
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+
+  network_dhcp_label = Create_Label(network_screen, 34, 49, 90, "DHCP",
+                                    lv_color_hex(0xE8EEF2));
+  network_dhcp_switch = lv_button_create(network_screen);
+  lv_obj_set_pos(network_dhcp_switch, 126, 43);
+  lv_obj_set_size(network_dhcp_switch, 92, 30);
+  lv_obj_set_checkable(network_dhcp_switch, true);
+  lv_obj_set_style_bg_color(network_dhcp_switch, lv_color_hex(0x21343E), 0);
+  lv_obj_set_style_bg_opa(network_dhcp_switch, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_color(network_dhcp_switch, lv_color_hex(0x238DB8),
+                            LV_STATE_CHECKED);
+  lv_obj_set_style_bg_opa(network_dhcp_switch, LV_OPA_COVER, LV_STATE_CHECKED);
+  lv_obj_set_style_bg_color(network_dhcp_switch, lv_color_hex(0x17698C),
+                            LV_STATE_PRESSED);
+  lv_obj_set_style_bg_opa(network_dhcp_switch, LV_OPA_COVER, LV_STATE_PRESSED);
+  lv_obj_set_style_border_color(network_dhcp_switch, lv_color_hex(0x65C7F7), 0);
+  lv_obj_set_style_border_width(network_dhcp_switch, 1, 0);
+  lv_obj_set_style_radius(network_dhcp_switch, 4, 0);
+  lv_obj_set_style_pad_all(network_dhcp_switch, 0, 0);
+  lv_obj_add_event_cb(network_dhcp_switch, Network_DhcpChanged,
+                      LV_EVENT_VALUE_CHANGED, NULL);
+  network_dhcp_state_label = lv_label_create(network_dhcp_switch);
+  lv_label_set_text(network_dhcp_state_label, "OFF");
+  lv_obj_set_style_text_color(network_dhcp_state_label, lv_color_hex(0xF4FAFD), 0);
+  lv_obj_center(network_dhcp_state_label);
+
+  network_ip_label = Create_Label(network_screen, 34, 91, 90, "Static IP",
+                                  lv_color_hex(0xE8EEF2));
+  network_ip_textarea = lv_textarea_create(network_screen);
+  lv_obj_set_pos(network_ip_textarea, 126, 78);
+  lv_obj_set_size(network_ip_textarea, 206, 38);
+
+  network_mask_label = Create_Label(network_screen, 34, 135, 90, "Netmask",
+                                    lv_color_hex(0xE8EEF2));
+  network_mask_textarea = lv_textarea_create(network_screen);
+  lv_obj_set_pos(network_mask_textarea, 126, 122);
+  lv_obj_set_size(network_mask_textarea, 206, 38);
+
+  network_gateway_label = Create_Label(network_screen, 34, 179, 90, "Gateway",
+                                       lv_color_hex(0xE8EEF2));
+  network_gateway_textarea = lv_textarea_create(network_screen);
+  lv_obj_set_pos(network_gateway_textarea, 126, 166);
+  lv_obj_set_size(network_gateway_textarea, 206, 38);
+
+  {
+    lv_obj_t *fields[] =
+    {
+      network_ip_textarea, network_mask_textarea, network_gateway_textarea
+    };
+    uint32_t field;
+    for (field = 0U; field < (sizeof(fields) / sizeof(fields[0])); ++field)
+    {
+      lv_textarea_set_one_line(fields[field], true);
+      lv_textarea_set_max_length(fields[field], 15U);
+      lv_textarea_set_accepted_chars(fields[field], "0123456789.");
+      lv_obj_set_style_bg_color(fields[field], lv_color_hex(0x21343E), 0);
+      lv_obj_set_style_text_color(fields[field], lv_color_hex(0xF4FAFD), 0);
+      lv_obj_set_style_border_color(fields[field], lv_color_hex(0x65C7F7), 0);
+      lv_obj_set_style_border_width(fields[field], 1, 0);
+      lv_obj_set_style_radius(fields[field], 0, 0);
+      lv_obj_set_style_pad_all(fields[field], 7, 0);
+      lv_obj_add_event_cb(fields[field], Network_FieldClicked, LV_EVENT_CLICKED, NULL);
+    }
+  }
+
+  network_save_button = Create_NavigationButton(network_screen, 350, 78, 104, 82,
+                                                "Save\nand apply", NULL);
+  lv_obj_add_event_cb(network_save_button, Network_SaveClicked, LV_EVENT_CLICKED, NULL);
+  network_status_label = Create_Label(network_screen, 34, 228, 420,
+                                      "Edit and press Save", lv_color_hex(0xA9C7D7));
+  lv_obj_set_style_text_align(network_status_label, LV_TEXT_ALIGN_CENTER, 0);
+
+  network_edit_label = Create_Label(network_screen, 34, 55, 90, "Static IP",
+                                    lv_color_hex(0xE8EEF2));
+  lv_obj_set_hidden(network_edit_label, true);
+
+  network_keyboard = lv_keyboard_create(network_screen);
+  lv_keyboard_set_mode(network_keyboard, LV_KEYBOARD_MODE_NUMBER);
+  lv_obj_set_size(network_keyboard, LCD_WIDTH, LCD_HEIGHT - 86);
+  lv_obj_align(network_keyboard, LV_ALIGN_TOP_LEFT, 0, 86);
+  lv_obj_add_event_cb(network_keyboard, Network_KeyboardEvent, LV_EVENT_ALL, NULL);
+  lv_obj_set_hidden(network_keyboard, true);
+  lv_obj_add_event_cb(network_screen, Network_ScreenLoaded,
+                      LV_EVENT_SCREEN_LOADED, NULL);
+  lv_obj_add_event_cb(network_screen, Network_ScreenUnloaded,
+                      LV_EVENT_SCREEN_UNLOADED, NULL);
 
   nodes_back_button = Create_NavigationButton(nodes_screen, 4, 3, 44, 34,
                                                LV_SYMBOL_HOME, main_screen);
@@ -1985,7 +2303,6 @@ void Ui_Init(void)
   events_programmatic_scroll = false;
   node_events_paused = false;
   node_object_mode = false;
-  deep_sdo_mode = false;
   rows_dirty = false;
   Refresh_LogStatus();
   lv_screen_load(main_screen);

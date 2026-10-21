@@ -29,6 +29,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "can_capture.h"
+#include "app_settings.h"
 
 /* USER CODE END Includes */
 
@@ -138,6 +139,12 @@ int main(void)
   MX_LTDC_Init();
   /* USER CODE BEGIN 2 */
   CanCapture_Init();
+  AppSettings_Init();
+  {
+    DeviceSettings settings;
+    AppSettings_Get(&settings);
+    CanControl_RequestBitrate(settings.can_bitrate_kbps);
+  }
 
   /* USER CODE END 2 */
 
@@ -248,6 +255,23 @@ void MPU_Config(void)
   MPU_InitStruct.BaseAddress = 0xC0000000U;
   MPU_InitStruct.Size = MPU_REGION_SIZE_8MB;
   MPU_InitStruct.SubRegionDisable = 0x00U;
+  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL1;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
+  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
+  /* ETH DMA descriptors and the dedicated LwIP heap occupy the last 64 KiB
+     of internal SRAM. Keep it non-cacheable so zero-copy RX/TX is coherent. */
+  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
+  MPU_InitStruct.Number = MPU_REGION_NUMBER3;
+  MPU_InitStruct.BaseAddress = 0x20040000U;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_64KB;
+  MPU_InitStruct.SubRegionDisable = 0x00U;
+  /* Normal, non-cacheable memory: DMA coherent while still allowing the
+     unaligned halfword fields used by LwIP's packed pbuf metadata. */
   MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL1;
   MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
   MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;

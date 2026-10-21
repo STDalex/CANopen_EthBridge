@@ -1,6 +1,7 @@
 #include "canopen_analyzer.h"
 
 #include "FreeRTOS.h"
+#include "memory_layout.h"
 #include "task.h"
 
 #include <stdbool.h>
@@ -75,10 +76,26 @@ typedef struct
   bool has_address;
 } SdoFrameResult;
 
-static CanopenNodeState node_states[CANOPEN_NODE_COUNT_MAX];
-static CanopenEventState event_history[CANOPEN_EVENT_HISTORY_LENGTH];
-static CanopenSdoObjectState sdo_objects[CANOPEN_SDO_OBJECT_POOL_LENGTH];
-static CanopenSdoTransaction sdo_transactions[CANOPEN_NODE_COUNT_MAX];
+#define NODE_STATES_BYTES       (CANOPEN_NODE_COUNT_MAX * sizeof(CanopenNodeState))
+#define EVENT_HISTORY_BYTES     (CANOPEN_EVENT_HISTORY_LENGTH * sizeof(CanopenEventState))
+#define SDO_OBJECTS_BYTES       (CANOPEN_SDO_OBJECT_POOL_LENGTH * sizeof(CanopenSdoObjectState))
+#define SDO_TRANSACTIONS_BYTES  (CANOPEN_NODE_COUNT_MAX * sizeof(CanopenSdoTransaction))
+#define CANOPEN_ANALYZER_BYTES  (NODE_STATES_BYTES + EVENT_HISTORY_BYTES + \
+                                 SDO_OBJECTS_BYTES + SDO_TRANSACTIONS_BYTES)
+
+_Static_assert((CANOPEN_ANALYZER_STATE_BASE + CANOPEN_ANALYZER_BYTES) <= 0xC0800000UL,
+               "CANopen analyzer state exceeds external SDRAM");
+
+static CanopenNodeState *const node_states =
+  (CanopenNodeState *)CANOPEN_ANALYZER_STATE_BASE;
+static CanopenEventState *const event_history =
+  (CanopenEventState *)(CANOPEN_ANALYZER_STATE_BASE + NODE_STATES_BYTES);
+static CanopenSdoObjectState *const sdo_objects =
+  (CanopenSdoObjectState *)(CANOPEN_ANALYZER_STATE_BASE + NODE_STATES_BYTES +
+                            EVENT_HISTORY_BYTES);
+static CanopenSdoTransaction *const sdo_transactions =
+  (CanopenSdoTransaction *)(CANOPEN_ANALYZER_STATE_BASE + NODE_STATES_BYTES +
+                            EVENT_HISTORY_BYTES + SDO_OBJECTS_BYTES);
 static uint32_t event_write;
 static uint32_t event_count;
 static uint32_t queue_overflows;
@@ -510,10 +527,10 @@ static SdoFrameResult Process_Sdo(uint8_t node_id, CanopenMessageType type,
 
 void CanopenAnalyzer_Init(void)
 {
-  memset(node_states, 0, sizeof(node_states));
-  memset(event_history, 0, sizeof(event_history));
-  memset(sdo_objects, 0, sizeof(sdo_objects));
-  memset(sdo_transactions, 0, sizeof(sdo_transactions));
+  memset(node_states, 0, NODE_STATES_BYTES);
+  memset(event_history, 0, EVENT_HISTORY_BYTES);
+  memset(sdo_objects, 0, SDO_OBJECTS_BYTES);
+  memset(sdo_transactions, 0, SDO_TRANSACTIONS_BYTES);
   event_write = 0U;
   event_count = 0U;
   queue_overflows = 0U;
@@ -680,10 +697,10 @@ uint32_t CanopenAnalyzer_GetQueueOverflows(void)
 void CanopenAnalyzer_Reset(void)
 {
   taskENTER_CRITICAL();
-  memset(node_states, 0, sizeof(node_states));
-  memset(event_history, 0, sizeof(event_history));
-  memset(sdo_objects, 0, sizeof(sdo_objects));
-  memset(sdo_transactions, 0, sizeof(sdo_transactions));
+  memset(node_states, 0, NODE_STATES_BYTES);
+  memset(event_history, 0, EVENT_HISTORY_BYTES);
+  memset(sdo_objects, 0, SDO_OBJECTS_BYTES);
+  memset(sdo_transactions, 0, SDO_TRANSACTIONS_BYTES);
   event_write = 0U;
   event_count = 0U;
   queue_overflows = 0U;

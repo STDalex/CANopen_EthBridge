@@ -40,6 +40,30 @@ typedef struct
   int32_t last_error;
 } CanLogStatus;
 
+#define CAN_LOG_LIST_MAX 32U
+
+typedef struct
+{
+  char path[72];
+  uint32_t session_id;
+  uint64_t size_bytes;
+} CanLogFileInfo;
+
+typedef enum
+{
+  CAN_LOG_DOWNLOAD_OK = 0,
+  CAN_LOG_DOWNLOAD_INVALID_PATH,
+  CAN_LOG_DOWNLOAD_NOT_FOUND,
+  CAN_LOG_DOWNLOAD_UNAVAILABLE,
+  CAN_LOG_DOWNLOAD_IO_ERROR
+} CanLogDownloadResult;
+
+typedef struct
+{
+  uint64_t size_bytes;
+  bool active;
+} CanLogDownload;
+
 void CanLogger_Init(void);
 void CanLogger_StorageTask(void);
 void CanLogger_ProducerPoll(void);
@@ -51,6 +75,17 @@ void CanLogger_SetNodeSelected(uint8_t node_id, bool selected);
 bool CanLogger_IsNodeSelected(uint8_t node_id);
 void CanLogger_ClearSelectedNodes(void);
 void CanLogger_GetStatus(CanLogStatus *status);
+bool CanLogger_GetLogList(CanLogFileInfo *files, uint32_t capacity,
+                          uint32_t *count, uint32_t timeout_ms);
+CanLogDownloadResult CanLogger_DownloadBegin(CanLogDownload *download,
+                                             const char *path,
+                                             uint32_t timeout_ms);
+bool CanLogger_DownloadSeek(CanLogDownload *download, uint64_t offset,
+                            uint32_t timeout_ms);
+bool CanLogger_DownloadRead(CanLogDownload *download, uint32_t requested,
+                            const uint8_t **data, uint32_t *length,
+                            uint32_t timeout_ms);
+void CanLogger_DownloadEnd(CanLogDownload *download, uint32_t timeout_ms);
 void CanLogger_ResetCounters(void);
 
 const char *CanLogger_ModeName(CanLogMode mode);
