@@ -1,6 +1,7 @@
 #include "can_capture.h"
 
 #include "FreeRTOS.h"
+#include "app_watchdog.h"
 #include "can.h"
 #include "can_tx_manager.h"
 #include "cmsis_os.h"
@@ -62,9 +63,11 @@ static volatile bool requested_active;
 static volatile bool tx_gate_enabled;
 static TaskHandle_t consumer_task;
 
-static void TxGate_Disable(void)
+void CanSafety_EmergencyDisableTx(void)
 {
   uint32_t shift = 9U * 2U;
+  RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+  (void)RCC->AHB1ENR;
   GPIOB->BSRR = CAN1_TX_Pin;
   GPIOB->MODER = (GPIOB->MODER & ~(3UL << shift)) | (1UL << shift);
   GPIOB->OTYPER &= ~CAN1_TX_Pin;
@@ -158,7 +161,7 @@ static bool ConfigureController(const CanTiming *timing, bool active)
 {
   CAN_FilterTypeDef filter = {0};
 
-  TxGate_Disable();
+  CanSafety_EmergencyDisableTx();
   HAL_NVIC_DisableIRQ(CAN1_RX0_IRQn);
   HAL_NVIC_DisableIRQ(CAN1_SCE_IRQn);
   (void)HAL_CAN_Stop(&hcan1);
@@ -207,7 +210,7 @@ static bool ConfigureController(const CanTiming *timing, bool active)
   }
   else
   {
-    TxGate_Disable();
+    CanSafety_EmergencyDisableTx();
   }
   HAL_NVIC_EnableIRQ(CAN1_RX0_IRQn);
   HAL_NVIC_EnableIRQ(CAN1_SCE_IRQn);
@@ -239,7 +242,7 @@ void CanCapture_Init(void)
   requested_active = false;
   tx_gate_enabled = false;
   consumer_task = NULL;
-  TxGate_Disable();
+  CanSafety_EmergencyDisableTx();
   TimestampTimer_Init();
   timestamp_epoch_us = TIM2->CNT;
   capture_time_high = 0U;
@@ -355,7 +358,7 @@ void CanCapture_ErrorIRQHandler(void)
   ++error_count;
   if ((CAN1->ESR & CAN_ESR_BOFF) != 0U)
   {
-    TxGate_Disable();
+    CanSafety_EmergencyDisableTx();
     requested_active = false;
     operating_mode = CAN_OPERATING_ACTIVE_PENDING;
     safety_reason = CAN_SAFETY_BUS_OFF;
@@ -416,7 +419,7 @@ void CanControl_RequestSilent(void)
 
 void CanControl_ForceSilent(CanSafetyReason reason)
 {
-  TxGate_Disable();
+  CanSafety_EmergencyDisableTx();
   taskENTER_CRITICAL();
   requested_active = false;
   safety_reason = reason;
@@ -549,6 +552,8 @@ void CanControl_Task(void)
     uint32_t request = requested_bitrate;
     uint32_t now = HAL_GetTick();
 
+    AppWatchdog_Heartbeat(APP_WATCHDOG_CAN_CONTROL);
+
     if (requested_active)
     {
       if (operating_mode != CAN_OPERATING_ACTIVE)
@@ -567,7 +572,7 @@ void CanControl_Task(void)
           active_bitrate = 0U;
           observed_request = 0xFFFFFFFFU;
           trial_active = false;
-          TxGate_Disable();
+          CanSafety_EmergencyDisableTx();
         }
       }
       osDelay(10U);
@@ -584,7 +589,7 @@ void CanControl_Task(void)
         active_bitrate = 0U;
         observed_request = 0xFFFFFFFFU;
         trial_active = false;
-        TxGate_Disable();
+        CanSafety_EmergencyDisableTx();
       }
       operating_mode = CAN_OPERATING_SILENT;
       osDelay(10U);

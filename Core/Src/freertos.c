@@ -26,6 +26,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "app_watchdog.h"
 #include "can_capture.h"
 #include "can_log.h"
 #include "can_pipeline.h"
@@ -67,6 +68,8 @@ static StaticTask_t storageTaskControlBlock;
 static StackType_t storageTaskStack[STORAGE_TASK_STACK_WORDS];
 static StaticTask_t canTxTaskControlBlock;
 static StackType_t canTxTaskStack[1024U];
+static StaticTask_t watchdogTaskControlBlock;
+static StackType_t watchdogTaskStack[256U];
 
 /* USER CODE END Variables */
 osThreadId canRxTaskHandle;
@@ -85,6 +88,7 @@ osStaticThreadDef_t guiTaskControlBlock;
 /* USER CODE BEGIN FunctionPrototypes */
 static void StartStorageTask(void *argument);
 static void StartCanTxTask(void *argument);
+static void StartWatchdogTask(void *argument);
 
 /* USER CODE END FunctionPrototypes */
 
@@ -141,6 +145,13 @@ __weak void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTask
    /* Run time stack overflow checking is performed if
    configCHECK_FOR_STACK_OVERFLOW is defined to 1 or 2. This hook function is
    called if a stack overflow is detected. */
+  (void)xTask;
+  (void)pcTaskName;
+  CanSafety_EmergencyDisableTx();
+  taskDISABLE_INTERRUPTS();
+  for (;;)
+  {
+  }
 }
 /* USER CODE END 4 */
 
@@ -157,6 +168,11 @@ __weak void vApplicationMallocFailedHook(void)
    FreeRTOSConfig.h, and the xPortGetFreeHeapSize() API function can be used
    to query the size of free heap space that remains (although it does not
    provide information on how the remaining heap might be fragmented). */
+  CanSafety_EmergencyDisableTx();
+  taskDISABLE_INTERRUPTS();
+  for (;;)
+  {
+  }
 }
 /* USER CODE END 5 */
 
@@ -238,6 +254,12 @@ void MX_FREERTOS_Init(void) {
   (void)xTaskCreateStatic(StartCanTxTask, "canTxTask", 1024U,
                           NULL, tskIDLE_PRIORITY + 4U,
                           canTxTaskStack, &canTxTaskControlBlock);
+  (void)xTaskCreateStatic(StartWatchdogTask, "watchdogTask", 256U,
+                          NULL, tskIDLE_PRIORITY + 5U,
+                          watchdogTaskStack, &watchdogTaskControlBlock);
+  /* Start IWDG only after all monitored tasks have been created. The
+     watchdog task refreshes it only while the critical CAN tasks are alive. */
+  AppWatchdog_StartHardware();
   /* USER CODE END RTOS_THREADS */
 
 }
@@ -258,6 +280,7 @@ void StartCanRxTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
+    AppWatchdog_Heartbeat(APP_WATCHDOG_CAN_RX);
     (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20U));
     CanLogger_ProducerPoll();
     while (CanCapture_Pop(&frame))
@@ -362,6 +385,12 @@ static void StartCanTxTask(void *argument)
 {
   (void)argument;
   CanTxManager_Task();
+}
+
+static void StartWatchdogTask(void *argument)
+{
+  (void)argument;
+  AppWatchdog_Task();
 }
 
 /* USER CODE END Application */

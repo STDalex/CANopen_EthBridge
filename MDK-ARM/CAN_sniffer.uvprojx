@@ -410,6 +410,11 @@
               <FilePath>../Core/Src/can_capture.c</FilePath>
             </File>
             <File>
+              <FileName>app_watchdog.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/app_watchdog.c</FilePath>
+            </File>
+            <File>
               <FileName>can_tx_manager.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/can_tx_manager.c</FilePath>

@@ -62,6 +62,7 @@ bool CanCapture_Pop(CanFrameRecord *frame);
 void CanCapture_RxIRQHandler(void);
 void CanCapture_ErrorIRQHandler(void);
 void CanCapture_TimerIRQHandler(void);
+void CanSafety_EmergencyDisableTx(void);
 
 void CanControl_Task(void);
 void CanControl_RequestBitrate(uint32_t bitrate_kbps);

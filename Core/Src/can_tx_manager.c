@@ -1,6 +1,7 @@
 #include "can_tx_manager.h"
 
 #include "FreeRTOS.h"
+#include "app_watchdog.h"
 #include "can.h"
 #include "can_capture.h"
 #include "can_pipeline.h"
@@ -186,6 +187,7 @@ static CanTxResult Transmit(const CanTxQueueEntry *entry)
   for (;;)
   {
     uint32_t tsr = CAN1->TSR;
+    AppWatchdog_Heartbeat(APP_WATCHDOG_CAN_TX);
     if ((CAN1->ESR & CAN_ESR_BOFF) != 0U)
     {
       (void)HAL_CAN_AbortTxRequest(&hcan1, mailbox);
@@ -652,6 +654,7 @@ void CanTxManager_Task(void)
   uint32_t last_attempt = 0U;
   for (;;)
   {
+    AppWatchdog_Heartbeat(APP_WATCHDOG_CAN_TX);
     if (xQueueReceive(tx_queue, &entry, pdMS_TO_TICKS(10U)) == pdPASS)
     {
       last_attempt = ProcessEntry(&entry, last_attempt);
