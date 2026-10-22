@@ -29,6 +29,7 @@
 #include "can_capture.h"
 #include "can_log.h"
 #include "can_pipeline.h"
+#include "can_tx_manager.h"
 #include "canopen_analyzer.h"
 #include "api_server.h"
 #include "memory_layout.h"
@@ -64,6 +65,8 @@ static uint8_t analyzerFrameQueueStorage[ANALYZER_FRAME_QUEUE_LENGTH * sizeof(Ca
 static QueueHandle_t analyzerFrameQueue;
 static StaticTask_t storageTaskControlBlock;
 static StackType_t storageTaskStack[STORAGE_TASK_STACK_WORDS];
+static StaticTask_t canTxTaskControlBlock;
+static StackType_t canTxTaskStack[1024U];
 
 /* USER CODE END Variables */
 osThreadId canRxTaskHandle;
@@ -81,6 +84,7 @@ osStaticThreadDef_t guiTaskControlBlock;
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
 static void StartStorageTask(void *argument);
+static void StartCanTxTask(void *argument);
 
 /* USER CODE END FunctionPrototypes */
 
@@ -107,7 +111,29 @@ void CanPipeline_ResetStatistics(void)
   CanControl_ResetStatistics();
   CanopenAnalyzer_Reset();
   CanLogger_ResetCounters();
+  CanTx_ResetStatistics();
   taskEXIT_CRITICAL();
+}
+
+bool CanPipeline_PublishLocalTx(const CanFrameRecord *frame)
+{
+  bool analyzer_queued;
+  if ((frame == NULL) || ((frame->flags & CAN_FRAME_FLAG_LOCAL_TX) == 0U))
+  {
+    return false;
+  }
+
+  analyzer_queued = xQueueSend(analyzerFrameQueue, frame, 0U) == pdPASS;
+  if (!analyzer_queued)
+  {
+    CanopenAnalyzer_AddQueueOverflow();
+  }
+  ApiServer_SubmitFrame(frame);
+  if (xQueueSend(guiFrameQueue, frame, 0U) != pdPASS)
+  {
+    CanControl_AddGuiOverflow();
+  }
+  return analyzer_queued;
 }
 
 __weak void vApplicationStackOverflowHook(xTaskHandle xTask, signed char *pcTaskName)
@@ -180,6 +206,7 @@ void MX_FREERTOS_Init(void) {
                                           &analyzerFrameQueueControlBlock);
   CanopenAnalyzer_Init();
   CanLogger_Init();
+  CanTxManager_Init();
   NetworkService_Start();
   /* USER CODE END RTOS_QUEUES */
 
@@ -208,6 +235,9 @@ void MX_FREERTOS_Init(void) {
                           NULL, tskIDLE_PRIORITY + 2U,
                           storageTaskStack,
                           &storageTaskControlBlock);
+  (void)xTaskCreateStatic(StartCanTxTask, "canTxTask", 1024U,
+                          NULL, tskIDLE_PRIORITY + 4U,
+                          canTxTaskStack, &canTxTaskControlBlock);
   /* USER CODE END RTOS_THREADS */
 
 }
@@ -326,6 +356,12 @@ static void StartStorageTask(void *argument)
 {
   (void)argument;
   CanLogger_StorageTask();
+}
+
+static void StartCanTxTask(void *argument)
+{
+  (void)argument;
+  CanTxManager_Task();
 }
 
 /* USER CODE END Application */

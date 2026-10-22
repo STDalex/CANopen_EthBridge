@@ -4,6 +4,7 @@
 #include "app_version.h"
 #include "can_log.h"
 #include "can_pipeline.h"
+#include "can_tx_manager.h"
 #include "canopen_analyzer.h"
 #include "canopen_decoder.h"
 #include "lwip/api.h"
@@ -105,6 +106,7 @@ static struct netconn *volatile websocket_pending_connection;
 static volatile bool websocket_reserved;
 static ApiServerStatus public_status;
 static CanLogMode logger_configured_mode = CAN_LOG_MODE_FULL;
+static CanTxHistoryEntry tx_history_snapshot[CAN_TX_HISTORY_CAPACITY];
 
 static void StatusIncrement(uint32_t *value)
 {
@@ -975,6 +977,13 @@ static const char *FindJsonValue(const char *json, const char *key)
   return found;
 }
 
+static bool IsJsonValueDelimiter(char value)
+{
+  return (value == '\0') || (value == ',') || (value == '}') ||
+         (value == ']') || (value == ' ') || (value == '\t') ||
+         (value == '\r') || (value == '\n');
+}
+
 static bool JsonReadBool(const char *json, const char *key, bool *value)
 {
   const char *found = FindJsonValue(json, key);
@@ -982,12 +991,12 @@ static bool JsonReadBool(const char *json, const char *key, bool *value)
   {
     return false;
   }
-  if (strncmp(found, "true", 4U) == 0)
+  if ((strncmp(found, "true", 4U) == 0) && IsJsonValueDelimiter(found[4]))
   {
     *value = true;
     return true;
   }
-  if (strncmp(found, "false", 5U) == 0)
+  if ((strncmp(found, "false", 5U) == 0) && IsJsonValueDelimiter(found[5]))
   {
     *value = false;
     return true;
@@ -998,19 +1007,21 @@ static bool JsonReadBool(const char *json, const char *key, bool *value)
 static bool JsonReadUnsigned(const char *json, const char *key, uint32_t *value)
 {
   const char *found = FindJsonValue(json, key);
-  char *end;
-  unsigned long parsed;
+  uint32_t parsed = 0U;
 
   if ((found == NULL) || (*found < '0') || (*found > '9'))
   {
     return false;
   }
-  parsed = strtoul(found, &end, 10);
-  if (end == found)
+  do
   {
-    return false;
-  }
-  *value = (uint32_t)parsed;
+    uint32_t digit = (uint32_t)(*found - '0');
+    if (parsed > ((0xFFFFFFFFUL - digit) / 10U)) return false;
+    parsed = (parsed * 10U) + digit;
+    ++found;
+  } while ((*found >= '0') && (*found <= '9'));
+  if (!IsJsonValueDelimiter(*found)) return false;
+  *value = parsed;
   return true;
 }
 
@@ -1032,7 +1043,7 @@ static bool JsonReadString(const char *json, const char *key,
     return false;
   }
   length = (size_t)(end - found);
-  if (length >= capacity)
+  if ((length >= capacity) || !IsJsonValueDelimiter(end[1]))
   {
     return false;
   }
@@ -1119,6 +1130,36 @@ static const char *SyncStateName(CanSyncState state)
   }
 }
 
+static void WriteTxFrame(JsonWriter *writer, const CanTxFrame *frame)
+{
+  CanTxSdoRequest request;
+  uint32_t index;
+  if (!CanTx_DecodeSdoRequest(frame, &request))
+  {
+    WriterPrintf(writer, "\"command\":\"invalid\",\"raw\":[");
+    for (index = 0U; index < frame->dlc; ++index)
+    {
+      WriterPrintf(writer, "%s%u", index == 0U ? "" : ",",
+                   (unsigned int)frame->data[index]);
+    }
+    WriterPrintf(writer, "]");
+    return;
+  }
+  WriterPrintf(writer,
+               "\"node_id\":%u,\"command\":\"%s\",\"index\":%u,"
+               "\"subindex\":%u,\"value\":%lu,\"can_id\":%lu,\"raw\":[",
+               (unsigned int)request.node_id,
+               CanTx_SdoCommandName(request.command),
+               (unsigned int)request.index, (unsigned int)request.subindex,
+               (unsigned long)request.value, (unsigned long)frame->id);
+  for (index = 0U; index < frame->dlc; ++index)
+  {
+    WriterPrintf(writer, "%s%u", index == 0U ? "" : ",",
+                 (unsigned int)frame->data[index]);
+  }
+  WriterPrintf(writer, "],\"timeout_ms\":%u", (unsigned int)request.timeout_ms);
+}
+
 static const char *SdoStatusName(CanopenSdoStatus status)
 {
   switch (status)
@@ -1149,6 +1190,8 @@ static void HandleRoot(struct netconn *connection)
     "{\"api\":\"v1\",\"endpoints\":[\"/api/v1/state\","
     "\"/api/v1/config/network\",\"/api/v1/config/can\","
     "\"/api/v1/config/logger\","
+    "\"/api/v1/can/mode\",\"/api/v1/can/tx\","
+    "\"/api/v1/can/tx/history\",\"/api/v1/can/tx/periodic\","
     "\"/api/v1/logger/start\",\"/api/v1/logger/stop\","
     "\"/api/v1/nodes\",\"/api/v1/statistics\","
     "\"/api/v1/statistics/reset\","
@@ -1160,6 +1203,8 @@ static void HandleRoot(struct netconn *connection)
     strlen("{\"api\":\"v1\",\"endpoints\":[\"/api/v1/state\","
            "\"/api/v1/config/network\",\"/api/v1/config/can\","
            "\"/api/v1/config/logger\","
+           "\"/api/v1/can/mode\",\"/api/v1/can/tx\","
+           "\"/api/v1/can/tx/history\",\"/api/v1/can/tx/periodic\","
            "\"/api/v1/logger/start\",\"/api/v1/logger/stop\","
            "\"/api/v1/nodes\",\"/api/v1/statistics\","
            "\"/api/v1/statistics/reset\","
@@ -1198,10 +1243,15 @@ static void HandleState(struct netconn *connection)
                NetworkService_AddressSourceName(network.address_source));
   WriteIpv4(&writer, &network.ip);
   WriterPrintf(&writer,
-               "},\"can\":{\"state\":\"%s\",\"bitrate_kbps\":%lu,\"received\":%lu},"
+               "},\"can\":{\"state\":\"%s\",\"bitrate_kbps\":%lu,\"received\":%lu,"
+               "\"operating_mode\":\"%s\",\"tx_gate_enabled\":%s,"
+               "\"safety_reason\":\"%s\"},"
                "\"storage\":{\"state\":\"%s\",\"mode\":\"%s\",\"file\":\"%s\"}}\n",
                SyncStateName(capture.state), (unsigned long)capture.bitrate_kbps,
                (unsigned long)capture.received,
+               CanControl_OperatingModeName(capture.operating_mode),
+               capture.tx_gate_enabled ? "true" : "false",
+               CanControl_SafetyReasonName(capture.safety_reason),
                CanLogger_CardStateName(logger.card_state),
                CanLogger_ModeName(logger.mode), logger.file_name);
   WriterEnd(&writer);
@@ -1320,6 +1370,250 @@ static void HandleCanPut(struct netconn *connection, const char *body)
   }
   CanControl_RequestBitrate(settings.can_bitrate_kbps);
   WriteCanConfig(connection, "202 Accepted");
+}
+
+static void HandleCanModeGet(struct netconn *connection, const char *status)
+{
+  JsonWriter writer;
+  CanCaptureStatus capture;
+  CanTxStatus tx;
+  CanControl_GetStatus(&capture);
+  CanTx_GetStatus(&tx);
+  WriterBegin(&writer, connection, status);
+  WriterPrintf(&writer,
+               "{\"mode\":\"%s\",\"tx_gate_enabled\":%s,"
+               "\"bitrate_kbps\":%lu,\"sync_state\":\"%s\","
+               "\"safety_reason\":\"%s\",\"queue_depth\":%lu,"
+               "\"transmitting\":%s}\n",
+               CanControl_OperatingModeName(capture.operating_mode),
+               capture.tx_gate_enabled ? "true" : "false",
+               (unsigned long)capture.bitrate_kbps, SyncStateName(capture.state),
+               CanControl_SafetyReasonName(capture.safety_reason),
+               (unsigned long)tx.queue_depth, tx.transmitting ? "true" : "false");
+  WriterEnd(&writer);
+}
+
+static void HandleCanModePost(struct netconn *connection, const char *body)
+{
+  char mode[16];
+  bool confirmed = false;
+  if (!JsonReadString(body, "mode", mode, sizeof(mode)))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_mode",
+              "mode must be active or silent");
+    return;
+  }
+  if (strcmp(mode, "silent") == 0)
+  {
+    CanControl_RequestSilent();
+    HandleCanModeGet(connection, "202 Accepted");
+    return;
+  }
+  if (strcmp(mode, "active") != 0)
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_mode",
+              "mode must be active or silent");
+    return;
+  }
+  if (!JsonReadBool(body, "confirmed", &confirmed) || !confirmed)
+  {
+    SendError(connection, "422 Unprocessable Entity", "confirmation_required",
+              "Active CAN mode requires confirmed=true");
+    return;
+  }
+  if (!CanControl_RequestActive(true))
+  {
+    SendError(connection, "409 Conflict", "can_not_synchronized",
+              "Select or detect a valid bitrate before enabling active mode");
+    return;
+  }
+  HandleCanModeGet(connection, "202 Accepted");
+}
+
+static void HandleCanTxPost(struct netconn *connection, const char *body)
+{
+  JsonWriter writer;
+  CanTxSdoRequest request = {0};
+  CanTxSubmitResult result;
+  uint32_t value;
+  uint32_t sequence;
+  uint32_t period_ms = 0U;
+  char command[16];
+
+  request.timeout_ms = CAN_TX_DEFAULT_TIMEOUT_MS;
+  if (!JsonReadUnsigned(body, "node_id", &value) ||
+      (value < 1U) || (value > 127U))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_node_id",
+              "node_id must be between 1 and 127");
+    return;
+  }
+  request.node_id = (uint8_t)value;
+  if (!JsonReadUnsigned(body, "index", &value) || (value > 0xFFFFU))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_index",
+              "index must be between 0 and 65535");
+    return;
+  }
+  request.index = (uint16_t)value;
+  if (!JsonReadUnsigned(body, "subindex", &value) || (value > 0xFFU))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_subindex",
+              "subindex must be between 0 and 255");
+    return;
+  }
+  request.subindex = (uint8_t)value;
+  if (!JsonReadString(body, "command", command, sizeof(command)))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_sdo_command",
+              "command is required");
+    return;
+  }
+  if (strcmp(command, "read") == 0) request.command = CAN_TX_SDO_READ;
+  else if (strcmp(command, "write_u8") == 0) request.command = CAN_TX_SDO_WRITE_U8;
+  else if (strcmp(command, "write_u16") == 0) request.command = CAN_TX_SDO_WRITE_U16;
+  else if (strcmp(command, "write_u24") == 0) request.command = CAN_TX_SDO_WRITE_U24;
+  else if (strcmp(command, "write_u32") == 0) request.command = CAN_TX_SDO_WRITE_U32;
+  else
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_sdo_command",
+              "command must be read or write_u8/u16/u24/u32");
+    return;
+  }
+  if (request.command != CAN_TX_SDO_READ)
+  {
+    if (!JsonReadUnsigned(body, "value", &request.value))
+    {
+      SendError(connection, "422 Unprocessable Entity", "invalid_sdo_value",
+                "write commands require an unsigned value");
+      return;
+    }
+  }
+  if (JsonReadUnsigned(body, "timeout_ms", &value))
+  {
+    if ((value < 10U) || (value > 1000U))
+    {
+      SendError(connection, "422 Unprocessable Entity", "invalid_timeout",
+                "timeout_ms must be between 10 and 1000");
+      return;
+    }
+    request.timeout_ms = (uint16_t)value;
+  }
+  if (JsonReadUnsigned(body, "period_ms", &period_ms) &&
+      ((period_ms < CAN_TX_PERIOD_MIN_MS) ||
+       (period_ms > CAN_TX_PERIOD_MAX_MS) ||
+       (period_ms < request.timeout_ms)))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_period",
+              "period_ms must be 50..3600000 and not shorter than timeout_ms");
+    return;
+  }
+  result = period_ms != 0U ?
+    CanTx_StartPeriodicSdo(&request, period_ms, &sequence) :
+    CanTx_SubmitSdo(&request, &sequence);
+  if (result == CAN_TX_SUBMIT_INVALID)
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_sdo_request",
+              "SDO value does not fit the selected write size");
+    return;
+  }
+  if (result == CAN_TX_SUBMIT_MODE_DISABLED)
+  {
+    SendError(connection, "409 Conflict", "can_not_synchronized",
+              "Select or detect a valid bitrate before transmitting");
+    return;
+  }
+  if (result == CAN_TX_SUBMIT_QUEUE_FULL)
+  {
+    SendError(connection, "429 Too Many Requests", "tx_queue_full",
+              period_ms != 0U ? "Periodic transmission is already active" :
+                                "The bounded CAN transmit queue is full");
+    return;
+  }
+  WriterBegin(&writer, connection, "202 Accepted");
+  WriterPrintf(&writer,
+               "{\"sequence\":%lu,\"status\":\"%s\",\"period_ms\":%lu}\n",
+               (unsigned long)sequence,
+               period_ms != 0U ? "periodic" : "queued",
+               (unsigned long)period_ms);
+  WriterEnd(&writer);
+}
+
+static void HandleCanTxStatus(struct netconn *connection)
+{
+  JsonWriter writer;
+  CanTxStatus tx;
+  CanTx_GetStatus(&tx);
+  WriterBegin(&writer, connection, "200 OK");
+  WriterPrintf(&writer,
+    "{\"queue_depth\":%lu,\"queue_capacity\":%u,\"transmitting\":%s,"
+    "\"queued\":%lu,\"sent\":%lu,\"cancelled\":%lu,\"timeouts\":%lu,"
+    "\"arbitration_lost\":%lu,\"bus_off\":%lu,\"errors\":%lu,"
+    "\"last_sequence\":%lu,\"last_result\":\"%s\","
+    "\"rate_limit_fps\":%u,\"periodic_active\":%s,"
+    "\"periodic_sequence\":%lu,\"periodic_period_ms\":%lu,"
+    "\"periodic_attempts\":%lu}\n",
+    (unsigned long)tx.queue_depth, CAN_TX_QUEUE_CAPACITY,
+    tx.transmitting ? "true" : "false", (unsigned long)tx.queued,
+    (unsigned long)tx.sent, (unsigned long)tx.cancelled,
+    (unsigned long)tx.timeouts, (unsigned long)tx.arbitration_lost,
+    (unsigned long)tx.bus_off, (unsigned long)tx.errors,
+    (unsigned long)tx.last_sequence, CanTx_ResultName(tx.last_result),
+    (unsigned int)(1000U / CAN_TX_MIN_INTERVAL_MS),
+    tx.periodic_active ? "true" : "false",
+    (unsigned long)tx.periodic_sequence,
+    (unsigned long)tx.periodic_period_ms,
+    (unsigned long)tx.periodic_attempts);
+  WriterEnd(&writer);
+}
+
+static void HandleCanTxHistory(struct netconn *connection)
+{
+  JsonWriter writer;
+  size_t count = CanTx_CopyHistory(tx_history_snapshot, CAN_TX_HISTORY_CAPACITY);
+  size_t index;
+  WriterBegin(&writer, connection, "200 OK");
+  WriterPrintf(&writer, "{\"count\":%lu,\"items\":[", (unsigned long)count);
+  for (index = 0U; index < count; ++index)
+  {
+    CanTxHistoryEntry *entry = &tx_history_snapshot[index];
+    WriterPrintf(&writer, "%s{\"sequence\":%lu,\"timestamp_us\":%lu,"
+                 "\"result\":\"%s\",\"periodic\":%s,"
+                 "\"attempt_count\":%lu,", index == 0U ? "" : ",",
+                 (unsigned long)entry->sequence, (unsigned long)entry->timestamp_us,
+                 CanTx_ResultName(entry->result),
+                 entry->periodic ? "true" : "false",
+                 (unsigned long)entry->attempt_count);
+    WriteTxFrame(&writer, &entry->frame);
+    WriterChunk(&writer, "}", 1U);
+  }
+  WriterChunk(&writer, "]}\n", 3U);
+  WriterEnd(&writer);
+}
+
+static void HandleCanTxCancel(struct netconn *connection, uint32_t sequence)
+{
+  JsonWriter writer;
+  if (!CanTx_Cancel(sequence))
+  {
+    SendError(connection, "404 Not Found", "tx_sequence_not_pending",
+              "Transmission is not pending or has already completed");
+    return;
+  }
+  WriterBegin(&writer, connection, "202 Accepted");
+  WriterPrintf(&writer, "{\"sequence\":%lu,\"status\":\"cancelling\"}\n",
+               (unsigned long)sequence);
+  WriterEnd(&writer);
+}
+
+static void HandleCanTxPeriodicStop(struct netconn *connection)
+{
+  JsonWriter writer;
+  bool stopped = CanTx_StopPeriodic();
+  WriterBegin(&writer, connection, stopped ? "202 Accepted" : "200 OK");
+  WriterPrintf(&writer, "{\"periodic_active\":false,\"stopped\":%s}\n",
+               stopped ? "true" : "false");
+  WriterEnd(&writer);
 }
 
 static void WriteLoggerConfig(struct netconn *connection, const char *status)
@@ -1479,11 +1773,13 @@ static void HandleStatistics(struct netconn *connection)
   CanopenGlobalSnapshot analyzer;
   CanLogStatus logger;
   ApiServerStatus api;
+  CanTxStatus tx;
 
   CanControl_GetStatus(&capture);
   CanopenAnalyzer_GetGlobalSnapshot(&analyzer);
   CanLogger_GetStatus(&logger);
   ApiServer_GetStatus(&api);
+  CanTx_GetStatus(&tx);
   WriterBegin(&writer, connection, "200 OK");
   WriterPrintf(&writer,
     "{\"can\":{\"received\":%lu,\"ring_overflows\":%lu,\"gui_overflows\":%lu,"
@@ -1491,6 +1787,9 @@ static void HandleStatistics(struct netconn *connection)
     "\"analyzer\":{\"frames\":%lu,\"unique_nodes\":%lu,\"queue_overflows\":%lu},"
     "\"logger\":{\"stored_frames\":%llu,\"dropped_frames\":%llu,"
     "\"write_errors\":%lu,\"recoveries\":%lu},"
+    "\"tx\":{\"queued\":%lu,\"sent\":%lu,\"cancelled\":%lu,"
+    "\"timeouts\":%lu,\"arbitration_lost\":%lu,\"bus_off\":%lu,"
+    "\"errors\":%lu},"
     "\"websocket\":{\"active\":%s,\"connections\":%lu,\"batches\":%lu,"
     "\"frames\":%lu,\"lost_frames\":%lu},"
     "\"downloads\":{\"requests\":%lu,\"completed\":%lu,\"bytes\":%llu}}\n",
@@ -1502,6 +1801,10 @@ static void HandleStatistics(struct netconn *connection)
     (unsigned long long)logger.stored_frames,
     (unsigned long long)logger.dropped_frames,
     (unsigned long)logger.write_errors, (unsigned long)logger.recovery_count,
+    (unsigned long)tx.queued, (unsigned long)tx.sent,
+    (unsigned long)tx.cancelled, (unsigned long)tx.timeouts,
+    (unsigned long)tx.arbitration_lost, (unsigned long)tx.bus_off,
+    (unsigned long)tx.errors,
     api.websocket_active ? "true" : "false",
     (unsigned long)api.websocket_connections,
     (unsigned long)api.websocket_batches,
@@ -1569,12 +1872,13 @@ static void HandleFrames(struct netconn *connection, const char *query)
     uint32_t byte;
     WriterPrintf(&writer,
       "%s{\"timestamp_us\":%lu,\"capture_time_us\":%llu,\"id\":%lu,"
-      "\"extended\":%s,\"remote\":%s,\"dlc\":%u,\"data\":\"",
+      "\"extended\":%s,\"remote\":%s,\"local_tx\":%s,\"dlc\":%u,\"data\":\"",
       index == offset ? "" : ",", (unsigned long)frame->timestamp_us,
       (unsigned long long)(((uint64_t)frame->capture_time_high << 32) | frame->capture_time_us),
       (unsigned long)frame->id,
       (frame->flags & CAN_FRAME_FLAG_EXTENDED) != 0U ? "true" : "false",
       (frame->flags & CAN_FRAME_FLAG_REMOTE) != 0U ? "true" : "false",
+      (frame->flags & CAN_FRAME_FLAG_LOCAL_TX) != 0U ? "true" : "false",
       (unsigned int)frame->dlc);
     for (byte = 0U; byte < frame->dlc && byte < 8U; ++byte)
     {
@@ -1609,7 +1913,8 @@ static void HandleNodeEvents(struct netconn *connection, uint8_t node_id,
       "\"sdo_status\":\"%s\",\"index\":%u,\"subindex\":%u,"
       "\"response_time_us\":%lu,\"transaction_time_us\":%lu,"
       "\"transferred_bytes\":%lu,\"abort_code\":%lu,"
-      "\"extended\":%s,\"remote\":%s,\"dlc\":%u,"
+      "\"extended\":%s,\"remote\":%s,\"local_tx\":%s,"
+      "\"local_transaction\":%s,\"dlc\":%u,"
       "\"has_response_time\":%s,\"has_sdo_address\":%s,"
       "\"data_offset\":%u,\"data\":\"",
       index == offset ? "" : ",", (unsigned long)event->frame.timestamp_us,
@@ -1620,6 +1925,8 @@ static void HandleNodeEvents(struct netconn *connection, uint8_t node_id,
       (unsigned long)event->transferred_bytes, (unsigned long)event->abort_code,
       (event->frame.flags & CAN_FRAME_FLAG_EXTENDED) != 0U ? "true" : "false",
       (event->frame.flags & CAN_FRAME_FLAG_REMOTE) != 0U ? "true" : "false",
+      (event->frame.flags & CAN_FRAME_FLAG_LOCAL_TX) != 0U ? "true" : "false",
+      event->local_transaction ? "true" : "false",
       (unsigned int)event->frame.dlc,
       event->has_response_time ? "true" : "false",
       event->has_sdo_address ? "true" : "false",
@@ -2028,6 +2335,29 @@ static bool ParseNodePath(const char *path, const char *suffix, uint8_t *node_id
   return true;
 }
 
+static bool ParseTxCancelPath(const char *path, uint32_t *sequence)
+{
+  static const char prefix[] = "/api/v1/can/tx/";
+  static const char suffix[] = "/cancel";
+  const char *cursor;
+  uint32_t value = 0U;
+  uint32_t digits = 0U;
+  if ((path == NULL) || (sequence == NULL) ||
+      (strncmp(path, prefix, sizeof(prefix) - 1U) != 0)) return false;
+  cursor = path + sizeof(prefix) - 1U;
+  while ((*cursor >= '0') && (*cursor <= '9'))
+  {
+    uint32_t digit = (uint32_t)(*cursor - '0');
+    if (value > ((0xFFFFFFFFUL - digit) / 10U)) return false;
+    value = (value * 10U) + digit;
+    ++cursor;
+    ++digits;
+  }
+  if ((digits == 0U) || (value == 0U) || (strcmp(cursor, suffix) != 0)) return false;
+  *sequence = value;
+  return true;
+}
+
 static bool Dispatch(struct netconn *connection, char *request)
 {
   char method[8];
@@ -2038,6 +2368,7 @@ static bool Dispatch(struct netconn *connection, char *request)
   char *query;
   char *body = strstr(request, "\r\n\r\n");
   uint8_t node_id;
+  uint32_t tx_sequence;
 
   if (!ParseRequestLine(request, method, sizeof(method), target, sizeof(target)) ||
       (body == NULL))
@@ -2067,6 +2398,22 @@ static bool Dispatch(struct netconn *connection, char *request)
     WriteCanConfig(connection, "200 OK");
   else if ((strcmp(method, "PUT") == 0) && (strcmp(path, "/api/v1/config/can") == 0))
     HandleCanPut(connection, body);
+  else if ((strcmp(method, "GET") == 0) && (strcmp(path, "/api/v1/can/mode") == 0))
+    HandleCanModeGet(connection, "200 OK");
+  else if ((strcmp(method, "POST") == 0) && (strcmp(path, "/api/v1/can/mode") == 0))
+    HandleCanModePost(connection, body);
+  else if ((strcmp(method, "GET") == 0) && (strcmp(path, "/api/v1/can/tx") == 0))
+    HandleCanTxStatus(connection);
+  else if ((strcmp(method, "POST") == 0) && (strcmp(path, "/api/v1/can/tx") == 0))
+    HandleCanTxPost(connection, body);
+  else if ((strcmp(method, "GET") == 0) &&
+           (strcmp(path, "/api/v1/can/tx/history") == 0))
+    HandleCanTxHistory(connection);
+  else if ((strcmp(method, "DELETE") == 0) &&
+           (strcmp(path, "/api/v1/can/tx/periodic") == 0))
+    HandleCanTxPeriodicStop(connection);
+  else if ((strcmp(method, "POST") == 0) && ParseTxCancelPath(path, &tx_sequence))
+    HandleCanTxCancel(connection, tx_sequence);
   else if ((strcmp(method, "GET") == 0) && (strcmp(path, "/api/v1/config/logger") == 0))
     WriteLoggerConfig(connection, "200 OK");
   else if ((strcmp(method, "PUT") == 0) && (strcmp(path, "/api/v1/config/logger") == 0))

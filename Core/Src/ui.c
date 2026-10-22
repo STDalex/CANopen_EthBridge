@@ -3,6 +3,7 @@
 #include "app_version.h"
 #include "app_settings.h"
 #include "can_log.h"
+#include "can_tx_manager.h"
 #include "canopen_analyzer.h"
 #include "can_pipeline.h"
 #include "cmsis_os.h"
@@ -14,6 +15,7 @@
 #include "lvgl.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 LV_FONT_DECLARE(ui_font_cyrillic_14)
@@ -128,6 +130,20 @@ static const UiBitrateOption bitrate_options[] =
   {"10", "10 kbit/s  " LV_SYMBOL_DOWN, 10U}
 };
 
+static const char *const tx_hex_keyboard_map[] =
+{
+  "0", "1", "2", "3", "4", "5", "6", "7", "\n",
+  "8", "9", "A", "B", "C", "D", "E", "F", "\n",
+  LV_SYMBOL_LEFT, LV_SYMBOL_RIGHT, LV_SYMBOL_BACKSPACE, LV_SYMBOL_OK, ""
+};
+
+static const lv_buttonmatrix_ctrl_t tx_hex_keyboard_ctrl[] =
+{
+  1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 1, 1, 1, 1, 1, 1,
+  1, 1, 2, LV_KEYBOARD_CTRL_BUTTON_FLAGS | 2
+};
+
 static uint16_t draw_buffer[LCD_WIDTH * UI_DRAW_LINES] __attribute__((aligned(32)));
 static lv_obj_t *main_screen;
 static lv_obj_t *monitor_screen;
@@ -137,6 +153,7 @@ static lv_obj_t *nodes_screen;
 static lv_obj_t *node_events_screen;
 static lv_obj_t *info_screen;
 static lv_obj_t *log_screen;
+static lv_obj_t *tx_screen;
 static lv_obj_t *status_label;
 static lv_obj_t *main_status_label;
 static lv_obj_t *main_storage_label;
@@ -220,6 +237,25 @@ static lv_obj_t *log_space_label;
 static lv_obj_t *log_counters_label;
 static lv_obj_t *log_selection_label;
 static CanLogMode quick_log_mode = CAN_LOG_MODE_FULL;
+static lv_obj_t *tx_nav_button;
+static lv_obj_t *tx_mode_button;
+static lv_obj_t *tx_mode_label;
+static lv_obj_t *tx_status_label;
+static lv_obj_t *tx_node_textarea;
+static lv_obj_t *tx_index_textarea;
+static lv_obj_t *tx_subindex_textarea;
+static lv_obj_t *tx_value_textarea;
+static lv_obj_t *tx_period_textarea;
+static lv_obj_t *tx_command_label;
+static lv_obj_t *tx_edit_panel;
+static lv_obj_t *tx_edit_label;
+static lv_obj_t *tx_keyboard;
+static lv_obj_t *tx_active_field;
+static int32_t tx_field_x;
+static int32_t tx_field_y;
+static int32_t tx_field_width;
+static int32_t tx_field_height;
+static CanTxSdoCommand tx_command;
 
 static const char info_monitor_text[] =
   "Монитор: все принятые CAN-кадры с временем, ID, форматом, DLC и данными. "
@@ -236,7 +272,7 @@ static const char info_objects_text[] =
   "ERR - ошибка протокола; ORPH - ответ без наблюдавшегося запроса.";
 static const char info_bitrate_text[] =
   "Скорость: Auto перебирает поддерживаемые скорости. Ручной режим фиксирует "
-  "выбранное значение. CAN работает только на прием.";
+  "выбранное значение. После LOCK передачу можно отдельно включить в разделе TX.";
 static const char info_packet_types_text[] =
   "Типы: NMT - управление сетью; SYNC - синхронизация; EMCY - авария; "
   "TIME - время; TPDO - данные от ноды; RPDO - команды ноде; SDO - доступ к объектам; "
@@ -247,6 +283,7 @@ static void Refresh_NodeEventsSnapshot(void);
 static void Render_Rows(void);
 static void Render_NodeRows(void);
 static void Refresh_LogStatus(void);
+static void Tx_RefreshStatus(void);
 
 static const UiBitrateOption *Find_BitrateOption(uint32_t bitrate_kbps)
 {
@@ -526,6 +563,251 @@ static void Network_SaveClicked(lv_event_t *event)
   lv_obj_set_style_text_color(network_status_label, lv_color_hex(0x65C7F7), 0);
 }
 
+static bool Tx_ParseField(lv_obj_t *field, uint32_t base, uint32_t maximum,
+                          uint32_t *value)
+{
+  const char *text = lv_textarea_get_text(field);
+  char *end;
+  unsigned long parsed;
+  if ((text == NULL) || (*text == '\0') || (value == NULL)) return false;
+  parsed = strtoul(text, &end, (int)base);
+  if ((end == text) || (*end != '\0') || (parsed > maximum)) return false;
+  *value = (uint32_t)parsed;
+  return true;
+}
+
+static void Tx_StyleField(lv_obj_t *field)
+{
+  lv_obj_set_style_bg_color(field, lv_color_hex(0x17242B), 0);
+  lv_obj_set_style_bg_opa(field, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(field, lv_color_hex(0x38566A), 0);
+  lv_obj_set_style_border_width(field, 1, 0);
+  lv_obj_set_style_radius(field, 0, 0);
+  lv_obj_set_style_text_color(field, lv_color_hex(0xF4FAFD), 0);
+  lv_obj_set_style_pad_left(field, 10, 0);
+  lv_obj_set_style_pad_right(field, 8, 0);
+  lv_obj_set_style_bg_color(field, lv_color_hex(0x10181E), LV_STATE_DISABLED);
+  lv_obj_set_style_text_color(field, lv_color_hex(0x78909C), LV_STATE_DISABLED);
+  lv_obj_set_style_border_color(field, lv_color_hex(0x263842), LV_STATE_DISABLED);
+  lv_obj_set_style_opa(field, LV_OPA_COVER, LV_STATE_DISABLED);
+}
+
+static void Tx_UpdateFormLabels(void)
+{
+  const char *label;
+  uint32_t maximum_length;
+  switch (tx_command)
+  {
+    case CAN_TX_SDO_READ: label = "READ"; maximum_length = 8U; break;
+    case CAN_TX_SDO_WRITE_U8: label = "WRITE 8"; maximum_length = 2U; break;
+    case CAN_TX_SDO_WRITE_U16: label = "WRITE 16"; maximum_length = 4U; break;
+    case CAN_TX_SDO_WRITE_U24: label = "WRITE 24"; maximum_length = 6U; break;
+    default: label = "WRITE 32"; maximum_length = 8U; break;
+  }
+  lv_label_set_text(tx_command_label, label);
+  lv_textarea_set_max_length(tx_value_textarea, maximum_length);
+  if (tx_command == CAN_TX_SDO_READ)
+  {
+    lv_obj_add_state(tx_value_textarea, LV_STATE_DISABLED);
+  }
+  else
+  {
+    lv_obj_remove_state(tx_value_textarea, LV_STATE_DISABLED);
+  }
+}
+
+static void Tx_EndEditing(void)
+{
+  if (tx_active_field != NULL)
+  {
+    lv_obj_set_pos(tx_active_field, tx_field_x, tx_field_y);
+    lv_obj_set_size(tx_active_field, tx_field_width, tx_field_height);
+  }
+  tx_active_field = NULL;
+  lv_keyboard_set_textarea(tx_keyboard, NULL);
+  lv_obj_set_hidden(tx_keyboard, true);
+  lv_obj_set_hidden(tx_edit_panel, true);
+}
+
+static const char *Tx_FieldName(lv_obj_t *field)
+{
+  if (field == tx_node_textarea) return "Node";
+  if (field == tx_index_textarea) return "Object";
+  if (field == tx_subindex_textarea) return "Sub";
+  if (field == tx_value_textarea) return "Value";
+  if (field == tx_period_textarea) return "Period";
+  return "Value";
+}
+
+static void Tx_BeginEditing(lv_obj_t *field)
+{
+  if (lv_obj_has_state(field, LV_STATE_DISABLED)) return;
+  if ((tx_active_field != NULL) && (tx_active_field != field)) Tx_EndEditing();
+  tx_field_x = lv_obj_get_x(field);
+  tx_field_y = lv_obj_get_y(field);
+  tx_field_width = lv_obj_get_width(field);
+  tx_field_height = lv_obj_get_height(field);
+  tx_active_field = field;
+  lv_label_set_text(tx_edit_label, Tx_FieldName(field));
+  lv_obj_set_hidden(tx_edit_panel, false);
+  lv_obj_set_pos(field, 112, 41);
+  lv_obj_set_size(field, 360, 38);
+  lv_keyboard_set_mode(tx_keyboard,
+                       (field == tx_node_textarea || field == tx_period_textarea) ?
+                       LV_KEYBOARD_MODE_NUMBER : LV_KEYBOARD_MODE_USER_1);
+  lv_keyboard_set_textarea(tx_keyboard, field);
+  lv_obj_set_hidden(tx_keyboard, false);
+  lv_obj_move_foreground(tx_edit_panel);
+  lv_obj_move_foreground(field);
+  lv_obj_move_foreground(tx_keyboard);
+}
+
+static void Tx_FieldClicked(lv_event_t *event)
+{
+  Tx_BeginEditing(lv_event_get_target_obj(event));
+}
+
+static void Tx_KeyboardEvent(lv_event_t *event)
+{
+  lv_event_code_t code = lv_event_get_code(event);
+  if ((code == LV_EVENT_READY) || (code == LV_EVENT_CANCEL)) Tx_EndEditing();
+}
+
+static void Tx_CommandClicked(lv_event_t *event)
+{
+  (void)event;
+  tx_command = (CanTxSdoCommand)(((uint32_t)tx_command + 1U) % 5U);
+  Tx_UpdateFormLabels();
+}
+
+static bool Tx_ReadRequest(CanTxSdoRequest *request)
+{
+  uint32_t value;
+  if (request == NULL) return false;
+  memset(request, 0, sizeof(*request));
+  request->command = tx_command;
+  request->timeout_ms = CAN_TX_DEFAULT_TIMEOUT_MS;
+  if (!Tx_ParseField(tx_node_textarea, 10U, 127U, &value) || (value == 0U))
+  {
+    lv_label_set_text(tx_status_label, "Node ID must be 1..127 (decimal)");
+    return false;
+  }
+  request->node_id = (uint8_t)value;
+  if (!Tx_ParseField(tx_index_textarea, 16U, 0xFFFFU, &value))
+  {
+    lv_label_set_text(tx_status_label, "Object index must be 0000..FFFF (hex)");
+    return false;
+  }
+  request->index = (uint16_t)value;
+  if (!Tx_ParseField(tx_subindex_textarea, 16U, 0xFFU, &value))
+  {
+    lv_label_set_text(tx_status_label, "Subindex must be 00..FF (hex)");
+    return false;
+  }
+  request->subindex = (uint8_t)value;
+  if (tx_command != CAN_TX_SDO_READ)
+  {
+    if (!Tx_ParseField(tx_value_textarea, 16U, 0xFFFFFFFFUL, &request->value))
+    {
+      lv_label_set_text(tx_status_label, "Value does not fit selected write size");
+      return false;
+    }
+  }
+  return true;
+}
+
+static void Tx_ModeClicked(lv_event_t *event)
+{
+  CanTxStatus status;
+  CanTxSdoRequest request;
+  CanTxSubmitResult result;
+  uint32_t period_ms;
+  uint32_t sequence;
+  char text[96];
+  (void)event;
+  CanTx_GetStatus(&status);
+  if (status.periodic_active)
+  {
+    (void)CanTx_StopPeriodic();
+    lv_label_set_text(tx_status_label, "Periodic SDO stopping; returning to safe receive");
+    return;
+  }
+  if (!Tx_ReadRequest(&request)) return;
+  if (!Tx_ParseField(tx_period_textarea, 10U, CAN_TX_PERIOD_MAX_MS, &period_ms) ||
+      (period_ms < CAN_TX_PERIOD_MIN_MS) || (period_ms < request.timeout_ms))
+  {
+    lv_label_set_text(tx_status_label, "Period must be 50..3600000 ms and >= timeout");
+    return;
+  }
+  result = CanTx_StartPeriodicSdo(&request, period_ms, &sequence);
+  if (result == CAN_TX_SUBMIT_OK)
+  {
+    (void)snprintf(text, sizeof(text), "Periodic #%lu started every %lu ms",
+                   (unsigned long)sequence, (unsigned long)period_ms);
+    lv_label_set_text(tx_status_label, text);
+  }
+  else if (result == CAN_TX_SUBMIT_MODE_DISABLED)
+    lv_label_set_text(tx_status_label, "Wait for bitrate LOCK or select it manually");
+  else if (result == CAN_TX_SUBMIT_QUEUE_FULL)
+    lv_label_set_text(tx_status_label, "Periodic SDO is already active");
+  else
+    lv_label_set_text(tx_status_label, "Invalid period or SDO request");
+}
+
+static void Tx_SendClicked(lv_event_t *event)
+{
+  CanTxSdoRequest request;
+  CanTxSubmitResult result;
+  uint32_t sequence;
+  char text[96];
+  (void)event;
+  if (!Tx_ReadRequest(&request)) return;
+  result = CanTx_SubmitSdo(&request, &sequence);
+  if (result == CAN_TX_SUBMIT_OK)
+  {
+    (void)snprintf(text, sizeof(text),
+                   "Queued #%lu: node %u, %s 0x%04X:%02X",
+                   (unsigned long)sequence, (unsigned int)request.node_id,
+                   CanTx_SdoCommandName(request.command),
+                   (unsigned int)request.index, (unsigned int)request.subindex);
+    lv_label_set_text(tx_status_label, text);
+  }
+  else if (result == CAN_TX_SUBMIT_MODE_DISABLED)
+  {
+    lv_label_set_text(tx_status_label, "Wait for bitrate LOCK or select it manually");
+  }
+  else if (result == CAN_TX_SUBMIT_QUEUE_FULL)
+  {
+    lv_label_set_text(tx_status_label, "TX queue full (16 frames)");
+  }
+  else
+  {
+    lv_label_set_text(tx_status_label, "Invalid SDO request or value size");
+  }
+}
+
+static void Tx_ScreenLoaded(lv_event_t *event)
+{
+  (void)event;
+  Tx_EndEditing();
+  lv_label_set_text(tx_status_label, "");
+  Tx_RefreshStatus();
+}
+
+static void Tx_RefreshStatus(void)
+{
+  CanTxStatus tx;
+  CanTx_GetStatus(&tx);
+  lv_label_set_text(tx_mode_label,
+                    tx.periodic_active ? "STOP PERIODIC SEND" : "START PERIODIC SEND");
+  lv_obj_set_style_bg_color(lv_obj_get_child(tx_mode_button, 0),
+                            lv_color_hex(tx.periodic_active ? 0x6D28D9 : 0x17698C), 0);
+  lv_obj_set_style_bg_color(lv_obj_get_child(tx_nav_button, 0),
+                            lv_color_hex(tx.periodic_active ? 0x6D28D9 : 0x17698C), 0);
+  lv_obj_set_style_text_color(tx_status_label,
+                              lv_color_hex(tx.periodic_active ? 0xC084FC : 0xA9C7D7), 0);
+}
+
 static void Log_ModeSelected(lv_event_t *event)
 {
   CanLogMode selected_mode = (CanLogMode)(uintptr_t)lv_event_get_user_data(event);
@@ -632,6 +914,10 @@ static void Navigation_Clicked(lv_event_t *event)
     else if (target == log_screen)
     {
       Refresh_LogStatus();
+    }
+    else if (target == tx_screen)
+    {
+      Tx_RefreshStatus();
     }
     lv_screen_load(target);
   }
@@ -830,7 +1116,8 @@ static void Format_Row(UiRowText *text, const CanFrameRecord *frame)
   (void)snprintf(text->format, sizeof(text->format), "%s",
                  ((frame->flags & CAN_FRAME_FLAG_EXTENDED) != 0U) ? "EXT" : "STD");
   (void)snprintf(text->type, sizeof(text->type), "%s",
-                 ((frame->flags & CAN_FRAME_FLAG_REMOTE) != 0U) ? "RTR" : "DATA");
+                 ((frame->flags & CAN_FRAME_FLAG_LOCAL_TX) != 0U) ? "TX" :
+                 (((frame->flags & CAN_FRAME_FLAG_REMOTE) != 0U) ? "RTR" : "DATA"));
   (void)snprintf(text->length, sizeof(text->length), "%u", frame->dlc);
   text->data[0] = '\0';
 
@@ -856,6 +1143,11 @@ static void Clear_Row(UiRowText *text)
 
 static void Render_Rows(void)
 {
+  static const uint32_t normal_colors[6] =
+  {
+    0xE8EEF2U, 0xE8EEF2U, 0xA9C7D7U,
+    0xA9C7D7U, 0xA9C7D7U, 0xE8EEF2U
+  };
   int32_t scroll_y = lv_obj_get_scroll_y(table_body);
   uint32_t first_age;
   uint32_t row;
@@ -884,7 +1176,13 @@ static void Render_Rows(void)
 
     for (column = 0U; column < 6U; ++column)
     {
+      bool local_tx = (age < history_count) &&
+        ((history[(history_write - 1U - age) & UI_HISTORY_MASK].flags &
+          CAN_FRAME_FLAG_LOCAL_TX) != 0U);
       lv_obj_set_y(cell_labels[row][column], row_y);
+      lv_obj_set_style_text_color(cell_labels[row][column],
+                                  lv_color_hex(local_tx ? 0xC084FCU :
+                                               normal_colors[column]), 0);
       lv_obj_invalidate(cell_labels[row][column]);
     }
   }
@@ -1351,6 +1649,41 @@ static const char *Sdo_StatusName(CanopenSdoStatus status)
   }
 }
 
+static const char *Sdo_AbortShortName(uint32_t code)
+{
+  switch (code)
+  {
+    case 0x05040000U: return "TIMEOUT";
+    case 0x05040001U: return "BAD CMD";
+    case 0x05040004U: return "CRC";
+    case 0x05040005U: return "NO MEM";
+    case 0x06010000U: return "NO ACCESS";
+    case 0x06010001U: return "READ ONLY";
+    case 0x06010002U: return "WRITE ONLY";
+    case 0x06020000U: return "NO OBJECT";
+    case 0x06060000U: return "HARDWARE";
+    case 0x06070010U: return "BAD SIZE";
+    case 0x06090011U: return "NO SUB";
+    case 0x06090030U: return "BAD VALUE";
+    case 0x06090031U: return "TOO HIGH";
+    case 0x06090032U: return "TOO LOW";
+    case 0x08000021U: return "LOCAL CTRL";
+    case 0x08000022U: return "BAD STATE";
+    default: return "SDO ABORT";
+  }
+}
+
+static uint32_t Sdo_LittleEndianValue(const uint8_t *data, uint32_t size)
+{
+  uint32_t value = 0U;
+  uint32_t index;
+  for (index = 0U; (index < size) && (index < 4U); ++index)
+  {
+    value |= (uint32_t)data[index] << (index * 8U);
+  }
+  return value;
+}
+
 static void Format_EventRow(UiEventRowText *text, const CanopenNodeEventSnapshot *event)
 {
   uint32_t i;
@@ -1394,6 +1727,40 @@ static void Format_EventRow(UiEventRowText *text, const CanopenNodeEventSnapshot
   }
   else
   {
+    uint8_t command = event->frame.data[0];
+    if (address.valid && (event->abort_code != 0U || command == 0x80U))
+    {
+      uint32_t abort_code = event->abort_code;
+      if ((abort_code == 0U) && (event->frame.dlc >= 8U))
+      {
+        abort_code = Sdo_LittleEndianValue(&event->frame.data[4], 4U);
+      }
+      (void)snprintf(text->data, sizeof(text->data), "AB %08lX %s",
+                     (unsigned long)abort_code, Sdo_AbortShortName(abort_code));
+      return;
+    }
+    if (address.valid && (event->type == CANOPEN_MESSAGE_SDO_RX) && (command == 0x40U))
+    {
+      (void)snprintf(text->data, sizeof(text->data), "READ REQUEST");
+      return;
+    }
+    if (address.valid && (event->type == CANOPEN_MESSAGE_SDO_TX) && (command == 0x60U))
+    {
+      (void)snprintf(text->data, sizeof(text->data), "WRITE OK");
+      return;
+    }
+    if (address.valid && (event->frame.dlc >= 8U) &&
+        ((((event->type == CANOPEN_MESSAGE_SDO_RX) && ((command & 0xE0U) == 0x20U)) ||
+          ((event->type == CANOPEN_MESSAGE_SDO_TX) && ((command & 0xE0U) == 0x40U))) &&
+         ((command & 0x02U) != 0U)))
+    {
+      uint32_t size = ((command & 0x01U) != 0U) ? 4U - ((command >> 2U) & 0x03U) : 4U;
+      uint32_t value = Sdo_LittleEndianValue(&event->frame.data[4], size);
+      (void)snprintf(text->data, sizeof(text->data), "%s0x%0*lX (%lu)",
+                     event->type == CANOPEN_MESSAGE_SDO_RX ? "WR " : "",
+                     (int)(size * 2U), (unsigned long)value, (unsigned long)value);
+      return;
+    }
     for (i = data_start; (i < event->frame.dlc) && (offset < (sizeof(text->data) - 3U)); ++i)
     {
       offset += (uint32_t)snprintf(&text->data[offset], sizeof(text->data) - offset,
@@ -1415,6 +1782,11 @@ static void Clear_EventRow(UiEventRowText *text)
 
 static void Render_EventRows(void)
 {
+  static const uint32_t normal_colors[7] =
+  {
+    0xE8EEF2U, 0xA9C7D7U, 0xE8EEF2U, 0xA9C7D7U,
+    0xE8EEF2U, 0xE8EEF2U, 0xE8EEF2U
+  };
   int32_t scroll_y = lv_obj_get_scroll_y(node_events_table_body);
   uint32_t first;
   uint32_t row;
@@ -1439,7 +1811,12 @@ static void Render_EventRows(void)
     }
     for (column = 0U; column < 7U; ++column)
     {
+      bool local_transaction = (index < event_snapshot_count) &&
+        event_snapshot[index].local_transaction;
       lv_obj_set_y(event_cell_labels[row][column], y);
+      lv_obj_set_style_text_color(event_cell_labels[row][column],
+                                  lv_color_hex(local_transaction ? 0xC084FCU :
+                                               normal_colors[column]), 0);
       lv_obj_invalidate(event_cell_labels[row][column]);
     }
   }
@@ -1732,6 +2109,7 @@ void Ui_Init(void)
   lv_obj_t *title;
   lv_obj_t *overview;
   lv_obj_t *version;
+  lv_obj_t *button;
   uint32_t option;
   uint32_t row;
   uint32_t line;
@@ -1760,6 +2138,7 @@ void Ui_Init(void)
   node_events_screen = lv_obj_create(NULL);
   info_screen = lv_obj_create(NULL);
   log_screen = lv_obj_create(NULL);
+  tx_screen = lv_obj_create(NULL);
   nodes_return_screen = main_screen;
   Style_Screen(main_screen);
   Style_Screen(monitor_screen);
@@ -1771,6 +2150,7 @@ void Ui_Init(void)
   Style_Screen(node_events_screen);
   Style_Screen(info_screen);
   Style_Screen(log_screen);
+  Style_Screen(tx_screen);
   lv_obj_set_style_text_font(info_screen, &ui_font_cyrillic_14, 0);
 
   title = Create_Label(main_screen, 0, 14, LCD_WIDTH, "CAN Sniffer", lv_color_hex(0x65C7F7));
@@ -1778,9 +2158,14 @@ void Ui_Init(void)
   lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
   main_status_label = Create_Label(main_screen, 20, 42, 440, "CAN starting...", lv_color_hex(0xA9C7D7));
   lv_obj_set_style_text_align(main_status_label, LV_TEXT_ALIGN_CENTER, 0);
-  (void)Create_NavigationButton(main_screen, 12, 72, 144, 140, "CAN\nMonitor", monitor_screen);
-  (void)Create_NavigationButton(main_screen, 168, 72, 144, 140, "Nodes", nodes_screen);
-  (void)Create_NavigationButton(main_screen, 324, 72, 144, 140, "microSD\nLog", log_screen);
+  (void)Create_NavigationButton(main_screen, 12, 68, 222, 72,
+                                "CAN Monitor", monitor_screen);
+  (void)Create_NavigationButton(main_screen, 246, 68, 222, 72,
+                                "Nodes", nodes_screen);
+  (void)Create_NavigationButton(main_screen, 12, 148, 222, 72,
+                                "microSD Log", log_screen);
+  tx_nav_button = Create_NavigationButton(main_screen, 246, 148, 222, 72,
+                                           "CANopen SDO", tx_screen);
   main_storage_label = Create_Label(main_screen, 16, 230, 448,
                                     "SD:No card  Off  LOST:0", lv_color_hex(0xA9C7D7));
   lv_obj_set_style_text_align(main_storage_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -1789,6 +2174,108 @@ void Ui_Init(void)
   main_log_button = Create_QuickLogButton(main_screen, 304, &main_log_button_label);
   (void)Create_NavigationButton(main_screen, 384, 3, 44, 34, "i", info_screen);
   (void)Create_NavigationButton(main_screen, 432, 3, 44, 34, LV_SYMBOL_SETTINGS, settings_screen);
+
+  (void)Create_NavigationButton(tx_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
+  title = Create_Label(tx_screen, 56, 10, 416, "CANopen SDO client",
+                       lv_color_hex(0x65C7F7));
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+
+  (void)Create_Label(tx_screen, 8, 53, 38, "Node", lv_color_hex(0xA9C7D7));
+  tx_node_textarea = lv_textarea_create(tx_screen);
+  lv_obj_set_pos(tx_node_textarea, 46, 41);
+  lv_obj_set_size(tx_node_textarea, 54, 38);
+  Tx_StyleField(tx_node_textarea);
+  lv_textarea_set_one_line(tx_node_textarea, true);
+  lv_textarea_set_max_length(tx_node_textarea, 3U);
+  lv_textarea_set_accepted_chars(tx_node_textarea, "0123456789");
+  lv_textarea_set_text(tx_node_textarea, "1");
+  lv_obj_add_event_cb(tx_node_textarea, Tx_FieldClicked, LV_EVENT_CLICKED, NULL);
+
+  button = Create_NavigationButton(tx_screen, 108, 41, 102, 38, "READ", NULL);
+  tx_command_label = lv_obj_get_child(button, 1);
+  lv_obj_add_event_cb(button, Tx_CommandClicked, LV_EVENT_CLICKED, NULL);
+
+  (void)Create_Label(tx_screen, 218, 53, 46, "Object", lv_color_hex(0xA9C7D7));
+  tx_index_textarea = lv_textarea_create(tx_screen);
+  lv_obj_set_pos(tx_index_textarea, 266, 41);
+  lv_obj_set_size(tx_index_textarea, 92, 38);
+  Tx_StyleField(tx_index_textarea);
+  lv_textarea_set_one_line(tx_index_textarea, true);
+  lv_textarea_set_max_length(tx_index_textarea, 4U);
+  lv_textarea_set_accepted_chars(tx_index_textarea, "0123456789abcdefABCDEF");
+  lv_textarea_set_text(tx_index_textarea, "1018");
+  lv_obj_add_event_cb(tx_index_textarea, Tx_FieldClicked, LV_EVENT_CLICKED, NULL);
+
+  (void)Create_Label(tx_screen, 366, 53, 28, "Sub", lv_color_hex(0xA9C7D7));
+  tx_subindex_textarea = lv_textarea_create(tx_screen);
+  lv_obj_set_pos(tx_subindex_textarea, 396, 41);
+  lv_obj_set_size(tx_subindex_textarea, 76, 38);
+  Tx_StyleField(tx_subindex_textarea);
+  lv_textarea_set_one_line(tx_subindex_textarea, true);
+  lv_textarea_set_max_length(tx_subindex_textarea, 2U);
+  lv_textarea_set_accepted_chars(tx_subindex_textarea, "0123456789abcdefABCDEF");
+  lv_textarea_set_text(tx_subindex_textarea, "01");
+  lv_obj_add_event_cb(tx_subindex_textarea, Tx_FieldClicked, LV_EVENT_CLICKED, NULL);
+
+  (void)Create_Label(tx_screen, 8, 101, 46, "Value", lv_color_hex(0xA9C7D7));
+  tx_value_textarea = lv_textarea_create(tx_screen);
+  lv_obj_set_pos(tx_value_textarea, 58, 89);
+  lv_obj_set_size(tx_value_textarea, 414, 38);
+  Tx_StyleField(tx_value_textarea);
+  lv_textarea_set_one_line(tx_value_textarea, true);
+  lv_textarea_set_max_length(tx_value_textarea, 8U);
+  lv_textarea_set_accepted_chars(tx_value_textarea, "0123456789abcdefABCDEF");
+  lv_textarea_set_text(tx_value_textarea, "0");
+  lv_obj_add_event_cb(tx_value_textarea, Tx_FieldClicked, LV_EVENT_CLICKED, NULL);
+
+  button = Create_NavigationButton(tx_screen, 8, 135, 464, 42, "SEND", NULL);
+  lv_obj_add_event_cb(button, Tx_SendClicked, LV_EVENT_CLICKED, NULL);
+
+  (void)Create_Label(tx_screen, 8, 198, 50, "Period", lv_color_hex(0xA9C7D7));
+  tx_period_textarea = lv_textarea_create(tx_screen);
+  lv_obj_set_pos(tx_period_textarea, 62, 185);
+  lv_obj_set_size(tx_period_textarea, 100, 38);
+  Tx_StyleField(tx_period_textarea);
+  lv_textarea_set_one_line(tx_period_textarea, true);
+  lv_textarea_set_max_length(tx_period_textarea, 7U);
+  lv_textarea_set_accepted_chars(tx_period_textarea, "0123456789");
+  lv_textarea_set_text(tx_period_textarea, "1000");
+  lv_obj_add_event_cb(tx_period_textarea, Tx_FieldClicked, LV_EVENT_CLICKED, NULL);
+  (void)Create_Label(tx_screen, 166, 198, 28, "ms", lv_color_hex(0xA9C7D7));
+
+  tx_mode_button = Create_NavigationButton(tx_screen, 200, 185, 272, 38,
+                                            "START PERIODIC SEND", NULL);
+  tx_mode_label = lv_obj_get_child(tx_mode_button, 1);
+  lv_obj_add_event_cb(tx_mode_button, Tx_ModeClicked, LV_EVENT_CLICKED, NULL);
+
+  tx_status_label = Create_Label(tx_screen, 8, 238, 464, "",
+                                 lv_color_hex(0xA9C7D7));
+  lv_label_set_long_mode(tx_status_label, LV_LABEL_LONG_DOT);
+  lv_obj_set_height(tx_status_label, 24);
+
+  tx_keyboard = lv_keyboard_create(tx_screen);
+  lv_keyboard_set_map(tx_keyboard, LV_KEYBOARD_MODE_USER_1,
+                      tx_hex_keyboard_map, tx_hex_keyboard_ctrl);
+  lv_keyboard_set_mode(tx_keyboard, LV_KEYBOARD_MODE_NUMBER);
+  lv_obj_align(tx_keyboard, LV_ALIGN_TOP_LEFT, 0, 84);
+  lv_obj_set_size(tx_keyboard, LCD_WIDTH, LCD_HEIGHT - 84);
+  lv_obj_add_event_cb(tx_keyboard, Tx_KeyboardEvent, LV_EVENT_ALL, NULL);
+  lv_obj_set_hidden(tx_keyboard, true);
+
+  tx_edit_panel = lv_obj_create(tx_screen);
+  lv_obj_remove_style_all(tx_edit_panel);
+  lv_obj_set_pos(tx_edit_panel, 0, 38);
+  lv_obj_set_size(tx_edit_panel, LCD_WIDTH, 45);
+  lv_obj_set_style_bg_color(tx_edit_panel, lv_color_hex(0x101418), 0);
+  lv_obj_set_style_bg_opa(tx_edit_panel, LV_OPA_COVER, 0);
+  lv_obj_set_scrollable(tx_edit_panel, false);
+  tx_edit_label = Create_Label(tx_edit_panel, 52, 15, 56, "Value",
+                               lv_color_hex(0x65C7F7));
+  lv_obj_set_hidden(tx_edit_panel, true);
+
+  lv_obj_add_event_cb(tx_screen, Tx_ScreenLoaded, LV_EVENT_SCREEN_LOADED, NULL);
+  tx_command = CAN_TX_SDO_READ;
+  Tx_UpdateFormLabels();
 
   (void)Create_NavigationButton(log_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
   title = Create_Label(log_screen, 58, 10, 410, "microSD logging", lv_color_hex(0x65C7F7));
@@ -1823,8 +2310,8 @@ void Ui_Init(void)
   title = Create_Label(info_screen, 58, 10, 410, "Информация", lv_color_hex(0x65C7F7));
   lv_obj_set_style_text_font(title, &ui_font_cyrillic_14, 0);
   overview = Create_Label(info_screen, 16, 45, 448,
-                          "Пассивный анализатор Classic CAN/CANopen: кадры в реальном времени, "
-                          "статистика нод, объекты SDO и время ответа.",
+                          "Classic CAN/CANopen анализатор: после reset всегда пассивный. "
+                          "Передача доступна только через отдельное подтверждение в разделе TX.",
                           lv_color_hex(0xE8EEF2));
   lv_label_set_long_mode(overview, LV_LABEL_LONG_WRAP);
   lv_obj_set_height(overview, 48);
@@ -2329,6 +2816,7 @@ void Ui_TaskLoop(void)
   static uint32_t last_status_update;
   static uint32_t last_analyzer_update;
   CanCaptureStatus status;
+  CanTxStatus tx;
   uint32_t now = HAL_GetTick();
 
   if (rows_dirty)
@@ -2348,27 +2836,36 @@ void Ui_TaskLoop(void)
     char text[96];
     char main_text[112];
     const char *state;
+    const char *operating;
     uint32_t drops;
     CanControl_GetStatus(&status);
+    CanTx_GetStatus(&tx);
     state = (status.state == CAN_SYNC_LOCKED) ? "LOCK" :
             ((status.state == CAN_SYNC_MANUAL) ? "MAN" : "SCAN");
+    operating = tx.periodic_active ? "SDO TIMER/" : "";
     drops = status.ring_overflows + status.gui_overflows +
             CanopenAnalyzer_GetQueueOverflows();
-    (void)snprintf(text, sizeof(text), "CAN %s%s %luk RX:%lu D:%lu E:%lu",
-                   display_paused ? "PAUSE/" : "", state, (unsigned long)status.bitrate_kbps,
+    (void)snprintf(text, sizeof(text), "CAN %s%s%s %luk RX:%lu D:%lu E:%lu",
+                   operating, display_paused ? "PAUSE/" : "", state,
+                   (unsigned long)status.bitrate_kbps,
                    (unsigned long)status.received,
                    (unsigned long)drops,
                    (unsigned long)status.errors);
     (void)snprintf(main_text, sizeof(main_text),
-                   "CAN %s %lu k  LOAD:%lu.%lu%%  RX:%lu  DROP:%lu  ERR:%lu",
-                   state, (unsigned long)status.bitrate_kbps,
+                   "CAN %s%s %lu k  LOAD:%lu.%lu%%  RX:%lu  DROP:%lu  ERR:%lu",
+                   operating, state, (unsigned long)status.bitrate_kbps,
                    (unsigned long)(status.bus_load_permille / 10U),
                    (unsigned long)(status.bus_load_permille % 10U),
                    (unsigned long)status.received, (unsigned long)drops,
                    (unsigned long)status.errors);
     lv_label_set_text(status_label, text);
     lv_label_set_text(main_status_label, main_text);
+    lv_obj_set_style_text_color(status_label,
+      lv_color_hex(tx.periodic_active ? 0xC084FC : 0xE8EEF2), 0);
+    lv_obj_set_style_text_color(main_status_label,
+      lv_color_hex(tx.periodic_active ? 0xC084FC : 0xA9C7D7), 0);
     Refresh_LogStatus();
+    Tx_RefreshStatus();
     last_status_update = now;
   }
 

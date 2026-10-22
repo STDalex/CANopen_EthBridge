@@ -47,6 +47,7 @@ typedef struct
   bool active;
   bool ambiguous;
   bool last_segment_sent;
+  bool local_transaction;
   uint16_t index;
   uint8_t subindex;
   uint8_t expected_toggle;
@@ -74,6 +75,7 @@ typedef struct
   uint8_t subindex;
   uint8_t data_offset;
   bool has_address;
+  bool local_transaction;
 } SdoFrameResult;
 
 #define NODE_STATES_BYTES       (CANOPEN_NODE_COUNT_MAX * sizeof(CanopenNodeState))
@@ -153,6 +155,7 @@ static void Update_Object(uint8_t node_id, uint16_t index, uint8_t subindex,
   object->snapshot.transferred_bytes = result->transferred_bytes;
   object->snapshot.abort_code = result->abort_code;
   object->snapshot.segment_count = result->segment_count;
+  object->snapshot.local_transaction = result->local_transaction;
 }
 
 static void Mark_TransactionObjects(uint8_t node_id, const CanopenSdoTransaction *transaction,
@@ -175,6 +178,7 @@ static void Mark_TransactionObjects(uint8_t node_id, const CanopenSdoTransaction
       object->snapshot.transferred_bytes = transaction->transferred_bytes;
       object->snapshot.abort_code = abort_code;
       object->snapshot.segment_count = transaction->segment_count;
+      object->snapshot.local_transaction = transaction->local_transaction;
     }
   }
 }
@@ -212,6 +216,7 @@ static void Finish_Transaction(uint8_t node_id, CanopenSdoStatus status,
     result->index = transaction->index;
     result->subindex = transaction->subindex;
     result->has_address = true;
+    result->local_transaction = transaction->local_transaction;
   }
   transaction->active = false;
 }
@@ -234,6 +239,7 @@ static void Set_ResultFromTransaction(SdoFrameResult *result,
   result->has_address = true;
   result->transferred_bytes = transaction->transferred_bytes;
   result->segment_count = transaction->segment_count;
+  result->local_transaction = transaction->local_transaction;
 }
 
 static void Register_Orphan(uint8_t node_id, const CanopenSdoAddress *address,
@@ -265,6 +271,8 @@ static void Start_Transaction(uint8_t node_id, const CanFrameRecord *frame,
       (transaction->subindex == address->subindex) &&
       (transaction->direction == requested_direction))
   {
+    if ((frame->flags & CAN_FRAME_FLAG_LOCAL_TX) != 0U)
+      transaction->local_transaction = true;
     if (!transaction->ambiguous)
     {
       transaction->ambiguous = true;
@@ -288,6 +296,8 @@ static void Start_Transaction(uint8_t node_id, const CanFrameRecord *frame,
   transaction->started_us = frame->timestamp_us;
   transaction->last_activity_us = frame->timestamp_us;
   transaction->last_request_us = frame->timestamp_us;
+  transaction->local_transaction =
+    (frame->flags & CAN_FRAME_FLAG_LOCAL_TX) != 0U;
   transaction->phase = SDO_PHASE_INIT_RESPONSE;
   if (ccs == 2U)
   {
@@ -595,6 +605,7 @@ void CanopenAnalyzer_ProcessFrame(const CanFrameRecord *frame)
   event->snapshot.transferred_bytes = result.transferred_bytes;
   event->snapshot.abort_code = result.abort_code;
   event->snapshot.segment_count = result.segment_count;
+  event->snapshot.local_transaction = result.local_transaction;
   ++event_write;
   if (event_count < CANOPEN_EVENT_HISTORY_LENGTH) ++event_count;
   taskEXIT_CRITICAL();

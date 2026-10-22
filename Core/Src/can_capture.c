@@ -2,6 +2,7 @@
 
 #include "FreeRTOS.h"
 #include "can.h"
+#include "can_tx_manager.h"
 #include "cmsis_os.h"
 #include "main.h"
 #include "task.h"
@@ -55,7 +56,33 @@ static volatile uint32_t last_valid_tick;
 static volatile uint32_t requested_bitrate;
 static volatile uint32_t active_bitrate;
 static volatile CanSyncState sync_state;
+static volatile CanOperatingMode operating_mode;
+static volatile CanSafetyReason safety_reason;
+static volatile bool requested_active;
+static volatile bool tx_gate_enabled;
 static TaskHandle_t consumer_task;
+
+static void TxGate_Disable(void)
+{
+  uint32_t shift = 9U * 2U;
+  GPIOB->BSRR = CAN1_TX_Pin;
+  GPIOB->MODER = (GPIOB->MODER & ~(3UL << shift)) | (1UL << shift);
+  GPIOB->OTYPER &= ~CAN1_TX_Pin;
+  GPIOB->PUPDR &= ~(3UL << shift);
+  tx_gate_enabled = false;
+}
+
+static void TxGate_Enable(void)
+{
+  GPIO_InitTypeDef gpio = {0};
+  gpio.Pin = CAN1_TX_Pin;
+  gpio.Mode = GPIO_MODE_AF_PP;
+  gpio.Pull = GPIO_NOPULL;
+  gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  gpio.Alternate = GPIO_AF9_CAN1;
+  HAL_GPIO_Init(CAN1_TX_GPIO_Port, &gpio);
+  tx_gate_enabled = true;
+}
 
 static uint32_t NanosecondsPerBit(uint32_t bitrate_kbps)
 {
@@ -127,10 +154,11 @@ static const CanTiming *FindTiming(uint32_t bitrate_kbps)
   return NULL;
 }
 
-static bool ConfigureReceiver(const CanTiming *timing)
+static bool ConfigureController(const CanTiming *timing, bool active)
 {
   CAN_FilterTypeDef filter = {0};
 
+  TxGate_Disable();
   HAL_NVIC_DisableIRQ(CAN1_RX0_IRQn);
   HAL_NVIC_DisableIRQ(CAN1_SCE_IRQn);
   (void)HAL_CAN_Stop(&hcan1);
@@ -139,7 +167,7 @@ static bool ConfigureReceiver(const CanTiming *timing)
   hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
   hcan1.Init.TimeSeg1 = timing->time_seg1;
   hcan1.Init.TimeSeg2 = timing->time_seg2;
-  hcan1.Init.Mode = CAN_MODE_SILENT;
+  hcan1.Init.Mode = active ? CAN_MODE_NORMAL : CAN_MODE_SILENT;
   hcan1.Init.AutoBusOff = ENABLE;
   hcan1.Init.AutoWakeUp = DISABLE;
   hcan1.Init.AutoRetransmission = DISABLE;
@@ -173,6 +201,14 @@ static bool ConfigureReceiver(const CanTiming *timing)
   CAN1->IER = CAN_IER_FMPIE0 | CAN_IER_FOVIE0 | CAN_IER_EWGIE |
               CAN_IER_EPVIE | CAN_IER_BOFIE | CAN_IER_LECIE | CAN_IER_ERRIE;
   active_bitrate = timing->bitrate_kbps;
+  if (active)
+  {
+    TxGate_Enable();
+  }
+  else
+  {
+    TxGate_Disable();
+  }
   HAL_NVIC_EnableIRQ(CAN1_RX0_IRQn);
   HAL_NVIC_EnableIRQ(CAN1_SCE_IRQn);
   return true;
@@ -198,7 +234,12 @@ void CanCapture_Init(void)
   requested_bitrate = 0U;
   active_bitrate = 0U;
   sync_state = CAN_SYNC_SEARCHING;
+  operating_mode = CAN_OPERATING_SILENT;
+  safety_reason = CAN_SAFETY_POWER_ON;
+  requested_active = false;
+  tx_gate_enabled = false;
   consumer_task = NULL;
+  TxGate_Disable();
   TimestampTimer_Init();
   timestamp_epoch_us = TIM2->CNT;
   capture_time_high = 0U;
@@ -312,6 +353,13 @@ void CanCapture_RxIRQHandler(void)
 void CanCapture_ErrorIRQHandler(void)
 {
   ++error_count;
+  if ((CAN1->ESR & CAN_ESR_BOFF) != 0U)
+  {
+    TxGate_Disable();
+    requested_active = false;
+    operating_mode = CAN_OPERATING_ACTIVE_PENDING;
+    safety_reason = CAN_SAFETY_BUS_OFF;
+  }
   if ((CAN1->RF0R & CAN_RF0R_FOVR0) != 0U)
   {
     CAN1->RF0R = CAN_RF0R_FOVR0;
@@ -334,9 +382,73 @@ void CanControl_RequestBitrate(uint32_t bitrate_kbps)
 {
   if ((bitrate_kbps == 0U) || (FindTiming(bitrate_kbps) != NULL))
   {
+    if (operating_mode != CAN_OPERATING_SILENT)
+    {
+      CanControl_ForceSilent(CAN_SAFETY_BITRATE_CHANGE);
+    }
     taskENTER_CRITICAL();
     requested_bitrate = bitrate_kbps;
     taskEXIT_CRITICAL();
+  }
+}
+
+bool CanControl_RequestActive(bool confirmed)
+{
+  bool accepted = false;
+  if (!confirmed) return false;
+  taskENTER_CRITICAL();
+  if ((active_bitrate != 0U) && (sync_state != CAN_SYNC_SEARCHING) &&
+      (operating_mode == CAN_OPERATING_SILENT))
+  {
+    requested_active = true;
+    operating_mode = CAN_OPERATING_ACTIVE_PENDING;
+    safety_reason = CAN_SAFETY_USER;
+    accepted = true;
+  }
+  taskEXIT_CRITICAL();
+  return accepted;
+}
+
+void CanControl_RequestSilent(void)
+{
+  CanControl_ForceSilent(CAN_SAFETY_USER);
+}
+
+void CanControl_ForceSilent(CanSafetyReason reason)
+{
+  TxGate_Disable();
+  taskENTER_CRITICAL();
+  requested_active = false;
+  safety_reason = reason;
+  taskEXIT_CRITICAL();
+  CanTx_CancelAll();
+}
+
+bool CanControl_IsActive(void)
+{
+  return (operating_mode == CAN_OPERATING_ACTIVE) && tx_gate_enabled &&
+         ((CAN1->ESR & CAN_ESR_BOFF) == 0U);
+}
+
+const char *CanControl_OperatingModeName(CanOperatingMode mode)
+{
+  switch (mode)
+  {
+    case CAN_OPERATING_ACTIVE_PENDING: return "active_pending";
+    case CAN_OPERATING_ACTIVE: return "active";
+    default: return "silent";
+  }
+}
+
+const char *CanControl_SafetyReasonName(CanSafetyReason reason)
+{
+  switch (reason)
+  {
+    case CAN_SAFETY_USER: return "user";
+    case CAN_SAFETY_BITRATE_CHANGE: return "bitrate_change";
+    case CAN_SAFETY_BUS_OFF: return "bus_off";
+    case CAN_SAFETY_CONTROLLER_ERROR: return "controller_error";
+    default: return "power_on";
   }
 }
 
@@ -367,6 +479,9 @@ void CanControl_GetStatus(CanCaptureStatus *status)
   status->gui_overflows = gui_overflow_count - gui_overflow_statistics_base;
   status->errors = error_count - error_statistics_base;
   status->bus_load_permille = current_bus_load_permille;
+  status->operating_mode = operating_mode;
+  status->safety_reason = safety_reason;
+  status->tx_gate_enabled = tx_gate_enabled;
   taskEXIT_CRITICAL();
 }
 
@@ -397,6 +512,29 @@ uint32_t CanCapture_GetTimestampUs(void)
   return TIM2->CNT - timestamp_epoch_us;
 }
 
+void CanCapture_GetTimestamps(uint32_t *timestamp_us,
+                              uint32_t *capture_time_us,
+                              uint32_t *capture_time_high_value)
+{
+  uint32_t capture_low;
+  uint32_t capture_high;
+  uint32_t epoch;
+
+  taskENTER_CRITICAL();
+  capture_high = capture_time_high;
+  capture_low = TIM2->CNT;
+  if ((TIM2->SR & TIM_SR_UIF) != 0U)
+  {
+    ++capture_high;
+  }
+  epoch = timestamp_epoch_us;
+  taskEXIT_CRITICAL();
+
+  if (timestamp_us != NULL) *timestamp_us = capture_low - epoch;
+  if (capture_time_us != NULL) *capture_time_us = capture_low;
+  if (capture_time_high_value != NULL) *capture_time_high_value = capture_high;
+}
+
 void CanControl_Task(void)
 {
   uint32_t scan_index = 0U;
@@ -411,6 +549,48 @@ void CanControl_Task(void)
     uint32_t request = requested_bitrate;
     uint32_t now = HAL_GetTick();
 
+    if (requested_active)
+    {
+      if (operating_mode != CAN_OPERATING_ACTIVE)
+      {
+        const CanTiming *active_timing = FindTiming(active_bitrate);
+        if ((active_timing != NULL) && ConfigureController(active_timing, true))
+        {
+          operating_mode = CAN_OPERATING_ACTIVE;
+        }
+        else
+        {
+          requested_active = false;
+          operating_mode = CAN_OPERATING_SILENT;
+          safety_reason = CAN_SAFETY_CONTROLLER_ERROR;
+          sync_state = CAN_SYNC_SEARCHING;
+          active_bitrate = 0U;
+          observed_request = 0xFFFFFFFFU;
+          trial_active = false;
+          TxGate_Disable();
+        }
+      }
+      osDelay(10U);
+      continue;
+    }
+    else if (operating_mode != CAN_OPERATING_SILENT)
+    {
+      const CanTiming *silent_timing = FindTiming(active_bitrate);
+      CanTx_CancelAll();
+      if ((silent_timing == NULL) || !ConfigureController(silent_timing, false))
+      {
+        safety_reason = CAN_SAFETY_CONTROLLER_ERROR;
+        sync_state = CAN_SYNC_SEARCHING;
+        active_bitrate = 0U;
+        observed_request = 0xFFFFFFFFU;
+        trial_active = false;
+        TxGate_Disable();
+      }
+      operating_mode = CAN_OPERATING_SILENT;
+      osDelay(10U);
+      continue;
+    }
+
     if (request != observed_request)
     {
       observed_request = request;
@@ -423,11 +603,11 @@ void CanControl_Task(void)
       if (!trial_active)
       {
         const CanTiming *manual_timing = FindTiming(request);
-        if ((manual_timing != NULL) && ConfigureReceiver(manual_timing))
+        if ((manual_timing != NULL) && ConfigureController(manual_timing, false))
         {
           sync_state = CAN_SYNC_MANUAL;
+          trial_active = true;
         }
-        trial_active = true;
       }
       osDelay(100U);
       continue;
@@ -451,7 +631,7 @@ void CanControl_Task(void)
       trial_start_frames = received_count;
       trial_start_errors = error_count;
       trial_started = now;
-      (void)ConfigureReceiver(&can_timings[scan_index]);
+      (void)ConfigureController(&can_timings[scan_index], false);
       sync_state = CAN_SYNC_SEARCHING;
       trial_active = true;
     }

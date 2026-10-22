@@ -149,7 +149,7 @@ const char *CanopenDecoder_TypeName(CanopenMessageType type)
     "Unknown", "NMT", "SYNC", "EMCY", "TIME",
     "TPDO1", "RPDO1", "TPDO2", "RPDO2",
     "TPDO3", "RPDO3", "TPDO4", "RPDO4",
-    "SDO Tx", "SDO Rx", "HB/Guard", "LSS Tx", "LSS Rx"
+    "SDO Resp", "SDO Req", "HB/Guard", "LSS Tx", "LSS Rx"
   };
 
   if ((uint32_t)type >= (sizeof(names) / sizeof(names[0])))

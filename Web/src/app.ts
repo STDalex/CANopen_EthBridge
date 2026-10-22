@@ -1,15 +1,20 @@
 type Json = Record<string, unknown>;
 type ConnState = 'connecting' | 'online' | 'offline';
-type CanType = 'Unknown' | 'NMT' | 'SYNC' | 'EMCY' | 'TIME' | 'TPDO1' | 'RPDO1' | 'TPDO2' | 'RPDO2' | 'TPDO3' | 'RPDO3' | 'TPDO4' | 'RPDO4' | 'SDO Tx' | 'SDO Rx' | 'HB/Guard' | 'LSS Tx' | 'LSS Rx';
-interface Frame { timestamp: number; id: number; extended: boolean; remote: boolean; dlc: number; data: Uint8Array; type: CanType; node?: number; sdo?: string; sequence: number }
-interface DeviceState { firmware: string; uptime_ms: number; network: { initialized: boolean; link_up: boolean; source: string; ip: string }; can: { state: string; bitrate_kbps: number; received: number }; storage: { state: string; mode: string; file: string } }
-interface Statistics { can: { received: number; ring_overflows: number; gui_overflows: number; errors: number; bus_load_permille: number }; analyzer: { frames: number; unique_nodes: number; queue_overflows: number }; logger: { stored_frames: number; dropped_frames: number; write_errors: number; recoveries: number }; websocket: { active: boolean; connections: number; batches: number; frames: number; lost_frames: number } }
+type CanType = 'Unknown' | 'NMT' | 'SYNC' | 'EMCY' | 'TIME' | 'TPDO1' | 'RPDO1' | 'TPDO2' | 'RPDO2' | 'TPDO3' | 'RPDO3' | 'TPDO4' | 'RPDO4' | 'SDO Resp' | 'SDO Req' | 'HB/Guard' | 'LSS Tx' | 'LSS Rx';
+interface Frame { timestamp: number; id: number; extended: boolean; remote: boolean; localTx: boolean; dlc: number; data: Uint8Array; type: CanType; node?: number; sdo?: string; sequence: number }
+interface DeviceState { firmware: string; uptime_ms: number; network: { initialized: boolean; link_up: boolean; source: string; ip: string }; can: { state: string; bitrate_kbps: number; received: number; operating_mode: TxMode; tx_gate_enabled: boolean; safety_reason: string }; storage: { state: string; mode: string; file: string } }
+interface Statistics { can: { received: number; ring_overflows: number; gui_overflows: number; errors: number; bus_load_permille: number }; analyzer: { frames: number; unique_nodes: number; queue_overflows: number }; logger: { stored_frames: number; dropped_frames: number; write_errors: number; recoveries: number }; tx: { queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number }; websocket: { active: boolean; connections: number; batches: number; frames: number; lost_frames: number } }
 interface NodeInfo { node_id: number; last_type: string; first_seen_us: number; last_seen_us: number; frames: number; bytes: number; sdo_requests: number; sdo_responses: number; sdo_started: number; sdo_completed: number; sdo_aborted: number; sdo_timeouts: number; sdo_conflicts: number; sdo_orphans: number; sdo_protocol_errors: number; sdo_errors: number }
-interface NodeEvent { timestamp_us: number; id: number; type: string; sdo_status: string; index: number; subindex: number; response_time_us: number; transaction_time_us: number; transferred_bytes: number; abort_code: number; extended: boolean; remote: boolean; dlc: number; has_response_time: boolean; has_sdo_address: boolean; data_offset: number; data: string }
+interface NodeEvent { timestamp_us: number; id: number; type: string; sdo_status: string; index: number; subindex: number; response_time_us: number; transaction_time_us: number; transferred_bytes: number; abort_code: number; extended: boolean; remote: boolean; local_tx: boolean; local_transaction: boolean; dlc: number; has_response_time: boolean; has_sdo_address: boolean; data_offset: number; data: string }
 interface LoggerConfig { mode: 'full' | 'selected'; selected_nodes: number[]; recording: boolean; active_mode: 'off' | 'full' | 'selected'; card_state?: string; file?: string; file_size_bytes?: number; free_bytes?: number; stored_frames?: number; dropped_frames?: number; write_errors?: number; recoveries?: number; last_error?: number; selected_node_count?: number }
 interface NetworkConfig { dhcp_enabled: boolean; static_ip: string; netmask: string; gateway: string; http_port: number; dhcp_timeout_ms: number }
 interface CanConfig { bitrate_kbps: number; auto_bitrate: boolean; deep_sdo_enabled: boolean }
 interface LogInfo { path: string; session_id: number; size_bytes: number; download_url: string }
+type TxMode = 'silent' | 'active_pending' | 'active';
+type SdoCommand = 'read' | 'write_u8' | 'write_u16' | 'write_u24' | 'write_u32';
+interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean }
+interface CanTxStatus { queue_depth: number; queue_capacity: number; transmitting: boolean; queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number; last_sequence: number; last_result: string; rate_limit_fps: number; periodic_active: boolean; periodic_sequence: number; periodic_period_ms: number; periodic_attempts: number }
+interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; node_id: number; command: SdoCommand; index: number; subindex: number; value: number; can_id: number; raw: number[]; timeout_ms: number }
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const value = document.getElementById(id);
@@ -17,7 +22,7 @@ const $ = <T extends HTMLElement>(id: string): T => {
   return value as T;
 };
 const text = (id: string, value: string): void => { $(id).textContent = value; };
-const types: CanType[] = ['Unknown','NMT','SYNC','EMCY','TIME','TPDO1','RPDO1','TPDO2','RPDO2','TPDO3','RPDO3','TPDO4','RPDO4','SDO Tx','SDO Rx','HB/Guard','LSS Tx','LSS Rx'];
+const types: CanType[] = ['Unknown','NMT','SYNC','EMCY','TIME','TPDO1','RPDO1','TPDO2','RPDO2','TPDO3','RPDO3','TPDO4','RPDO4','SDO Resp','SDO Req','HB/Guard','LSS Tx','LSS Rx'];
 const frameBuffer: Frame[] = [];
 let pendingFrames: Frame[] = [];
 let filteredFrames: Frame[] = [];
@@ -47,6 +52,9 @@ let lastRateFrames = 0;
 let lastRateTime = performance.now();
 let liveRate = 0;
 let totalLiveFrames = 0;
+let txMode: CanModeStatus = { mode: 'silent', tx_gate_enabled: false, bitrate_kbps: 0, sync_state: 'searching', safety_reason: 'power_on', queue_depth: 0, transmitting: false };
+let txStatus: CanTxStatus = { queue_depth: 0, queue_capacity: 16, transmitting: false, queued: 0, sent: 0, cancelled: 0, timeouts: 0, arbitration_lost: 0, bus_off: 0, errors: 0, last_sequence: 0, last_result: 'mode_disabled', rate_limit_fps: 20, periodic_active: false, periodic_sequence: 0, periodic_period_ms: 0, periodic_attempts: 0 };
+let lastSubmittedSequence = 0;
 
 const escapeHtml = (value: unknown): string => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c] || c));
 const hex = (value: number, width: number): string => value.toString(16).toUpperCase().padStart(width, '0');
@@ -54,7 +62,10 @@ const formatInt = (value: number): string => new Intl.NumberFormat('ru-RU').form
 const formatBytes = (value: number): string => value >= 1073741824 ? `${(value/1073741824).toFixed(1)} ГиБ` : value >= 1048576 ? `${(value/1048576).toFixed(1)} МиБ` : value >= 1024 ? `${(value/1024).toFixed(1)} КиБ` : `${value} Б`;
 const formatTime = (microseconds: number): string => `${Math.floor(microseconds / 1_000_000)}.${String(Math.floor((microseconds % 1_000_000) / 10)).padStart(5,'0')} с`;
 const modeName = (mode: string): string => ({ off: 'Выключена', full: 'Все кадры', selected: 'Выбранные ноды' }[mode] || mode);
-const statusName = (status: string): string => ({ none: '—', waiting: 'ожидание', completed: 'завершено', aborted: 'отклонено', timeout: 'таймаут', ambiguous: 'неоднозначно', protocol_error: 'ошибка протокола', orphan: 'ответ без запроса' }[status] || status);
+const statusName = (status: string): string => ({ none: '—', waiting: 'ожидание ответа', completed: 'успешно', aborted: 'отказ ноды (SDO Abort)', timeout: 'нет ответа', ambiguous: 'неоднозначный ответ', protocol_error: 'ошибка протокола', orphan: 'ответ без запроса' }[status] || status);
+const txResultName = (result: string): string => ({ sent: 'Отправлен', cancelled: 'Отменён', timeout: 'Таймаут', arbitration_lost: 'Arbitration lost', bus_off: 'Bus-off', driver_error: 'Ошибка драйвера', mode_disabled: 'SILENT' }[result] || result);
+const sdoCommandName = (command: SdoCommand): string => ({ read: 'Чтение', write_u8: 'Запись 8', write_u16: 'Запись 16', write_u24: 'Запись 24', write_u32: 'Запись 32' }[command]);
+const sdoValueBytes = (command: SdoCommand): number => ({ read: 0, write_u8: 1, write_u16: 2, write_u24: 3, write_u32: 4 }[command]);
 const nodeErrorCount = (node: NodeInfo): number => node.sdo_aborted + node.sdo_timeouts + node.sdo_protocol_errors + node.sdo_conflicts + node.sdo_orphans;
 const nodeTraffic = (node: NodeInfo): number => analyzerFrames ? node.frames * 100 / analyzerFrames : 0;
 const nodeSdoSuccess = (node: NodeInfo): number | undefined => {
@@ -65,6 +76,75 @@ const nodeSdoSuccess = (node: NodeInfo): number | undefined => {
   return node.sdo_requests ? Math.min(100, node.sdo_responses * 100 / node.sdo_requests) : undefined;
 };
 const spacedHex = (value: string, offsetBytes = 0): string => (value.slice(offsetBytes * 2).match(/.{1,2}/g) || []).join(' ');
+
+const sdoAbortNames: Record<number, string> = {
+  0x05030000: 'Неверный toggle-bit',
+  0x05040000: 'Таймаут протокола SDO',
+  0x05040001: 'Неверная команда SDO',
+  0x05040002: 'Неверный размер блока',
+  0x05040003: 'Неверный номер сегмента',
+  0x05040004: 'Ошибка CRC',
+  0x05040005: 'Нет памяти',
+  0x06010000: 'Неподдерживаемый доступ к объекту',
+  0x06010001: 'Объект только для чтения',
+  0x06010002: 'Объект только для записи',
+  0x06020000: 'Объекта нет в словаре',
+  0x06040041: 'Объект нельзя отобразить в PDO',
+  0x06040042: 'Превышен размер PDO',
+  0x06040043: 'Несовместимые параметры',
+  0x06040047: 'Внутренняя несовместимость устройства',
+  0x06060000: 'Ошибка аппаратной части',
+  0x06070010: 'Неверный тип или размер данных',
+  0x06070012: 'Размер данных слишком большой',
+  0x06070013: 'Размер данных слишком малый',
+  0x06090011: 'Субиндекс не существует',
+  0x06090030: 'Значение вне допустимого диапазона',
+  0x06090031: 'Значение слишком большое',
+  0x06090032: 'Значение слишком малое',
+  0x06090036: 'Максимум меньше минимума',
+  0x08000000: 'Общая ошибка',
+  0x08000020: 'Данные нельзя передать или сохранить',
+  0x08000021: 'Доступ запрещен локальным управлением',
+  0x08000022: 'Доступ запрещен в текущем состоянии',
+  0x08000023: 'Не создан словарь объектов'
+};
+
+const sdoAbortName = (code: number): string => sdoAbortNames[code] || 'Неизвестная причина SDO Abort';
+const eventBytes = (event: NodeEvent): number[] => (event.data.match(/.{2}/g) || []).map(value => Number.parseInt(value, 16));
+const littleEndianValue = (bytes: number[]): number => bytes.reduce((value, byte, index) => value + byte * (2 ** (index * 8)), 0) >>> 0;
+
+function describeSdoData(event: NodeEvent): { main: string; detail?: string; title?: string } {
+  if (event.remote) return { main: 'RTR' };
+  const bytes = eventBytes(event);
+  const raw = spacedHex(event.data, event.has_sdo_address ? event.data_offset : 0) || '—';
+  if (!event.has_sdo_address || !bytes.length) return { main: raw };
+
+  const command = bytes[0] ?? 0;
+  if (command === 0x80) {
+    const code = event.abort_code || littleEndianValue(bytes.slice(4, 8));
+    const reason = sdoAbortName(code);
+    return { main: reason, detail: `SDO Abort 0x${hex(code, 8)} · LSB: ${raw}`, title: `${reason} (0x${hex(code, 8)})` };
+  }
+  if (event.type === 'SDO Req') {
+    if (command === 0x40) return { main: 'Запрос чтения', detail: 'Значения в запросе нет' };
+    if ((command & 0xE0) === 0x20 && (command & 0x02)) {
+      const size = (command & 0x01) ? 4 - ((command >> 2) & 0x03) : 4;
+      const valueBytes = bytes.slice(4, 4 + size);
+      const value = littleEndianValue(valueBytes);
+      return { main: `Запись 0x${hex(value, size * 2)} (${formatInt(value)})`, detail: `${size * 8} бит · LSB: ${valueBytes.map(byte => hex(byte, 2)).join(' ')}` };
+    }
+  }
+  if (event.type === 'SDO Resp') {
+    if ((command & 0xE0) === 0x40 && (command & 0x02)) {
+      const size = (command & 0x01) ? 4 - ((command >> 2) & 0x03) : 4;
+      const valueBytes = bytes.slice(4, 4 + size);
+      const value = littleEndianValue(valueBytes);
+      return { main: `0x${hex(value, size * 2)} (${formatInt(value)})`, detail: `${size * 8} бит · LSB: ${valueBytes.map(byte => hex(byte, 2)).join(' ')}` };
+    }
+    if (command === 0x60) return { main: 'Запись подтверждена', detail: 'Нода приняла значение' };
+  }
+  return { main: raw, detail: `LSB: ${raw}` };
+}
 
 function notify(message: string, error = false): void {
   const toast = $('toast');
@@ -97,7 +177,7 @@ function decodeFrame(frame: Omit<Frame,'type'|'node'|'sdo'>): Frame {
     else if (id === 0x7e4) type = 'LSS Tx';
     else if (id === 0x7e5) type = 'LSS Rx';
     else {
-      const ranges: Array<[number, CanType]> = [[0x080,'EMCY'],[0x180,'TPDO1'],[0x200,'RPDO1'],[0x280,'TPDO2'],[0x300,'RPDO2'],[0x380,'TPDO3'],[0x400,'RPDO3'],[0x480,'TPDO4'],[0x500,'RPDO4'],[0x580,'SDO Tx'],[0x600,'SDO Rx'],[0x700,'HB/Guard']];
+      const ranges: Array<[number, CanType]> = [[0x080,'EMCY'],[0x180,'TPDO1'],[0x200,'RPDO1'],[0x280,'TPDO2'],[0x300,'RPDO2'],[0x380,'TPDO3'],[0x400,'RPDO3'],[0x480,'TPDO4'],[0x500,'RPDO4'],[0x580,'SDO Resp'],[0x600,'SDO Req'],[0x700,'HB/Guard']];
       for (const [base, candidateType] of ranges) {
         const candidateNode = id - base;
         if (candidateNode >= 1 && candidateNode <= 127) { type = candidateType; node = candidateNode; break; }
@@ -106,9 +186,9 @@ function decodeFrame(frame: Omit<Frame,'type'|'node'|'sdo'>): Frame {
   }
   let sdo: string | undefined;
   const decodedType = String(type) as CanType;
-  if ((decodedType === 'SDO Tx' || decodedType === 'SDO Rx') && frame.dlc >= 4 && !frame.remote) {
+  if ((decodedType === 'SDO Resp' || decodedType === 'SDO Req') && frame.dlc >= 4 && !frame.remote) {
     const command = frame.data[0] || 0;
-    const indexed = decodedType === 'SDO Rx'
+    const indexed = decodedType === 'SDO Req'
       ? ((command >= 0x20 && command <= 0x3f) || command === 0x40 || command === 0x80 || (command >> 5) === 5 || (command >> 5) === 6)
       : ((command >= 0x40 && command <= 0x5f) || command === 0x60 || command === 0x80 || (command >> 5) === 5 || (command >> 5) === 6);
     if (indexed) sdo = `0x${hex((frame.data[1] || 0) | ((frame.data[2] || 0) << 8),4)}:${hex(frame.data[3] || 0,2)}`;
@@ -144,7 +224,7 @@ function parseBatch(buffer: ArrayBuffer): Frame[] {
     const dlc = Math.min(view.getUint8(offset + 13), 8);
     const data = new Uint8Array(dlc);
     for (let byte = 0; byte < dlc; byte++) data[byte] = view.getUint8(offset + 16 + byte);
-    result.push(decodeFrame({ timestamp, id: view.getUint32(offset + 8, true), extended: (flags & 1) !== 0, remote: (flags & 2) !== 0, dlc, data, sequence: (sequence + index) >>> 0 }));
+    result.push(decodeFrame({ timestamp, id: view.getUint32(offset + 8, true), extended: (flags & 1) !== 0, remote: (flags & 2) !== 0, localTx: (flags & 4) !== 0, dlc, data, sequence: (sequence + index) >>> 0 }));
   }
   text('gap-count', formatInt(missedFrames));
   text('gap-blocks', formatInt(gapBlocks));
@@ -216,7 +296,7 @@ function renderVisibleFrames(): void {
     const frame = filteredFrames[index];
     if (!frame) continue;
     const bytes = Array.from(frame.data, byte => hex(byte,2)).join(' ');
-    html += `<div class="frame-row frame-grid" style="transform:translateY(${index * 34}px)"><span>${formatTime(frame.timestamp)}</span><span>0x${hex(frame.id,frame.extended?8:3)}</span><span>${frame.extended ? 'EXT' : 'STD'}</span><span class="type">${frame.type}</span><span>${frame.node ?? '—'}</span><span class="sdo">${frame.sdo || '—'}</span><span>${frame.dlc}</span><span class="data">${bytes || (frame.remote ? 'RTR' : '—')}</span></div>`;
+    html += `<div class="frame-row frame-grid${frame.localTx ? ' local-transaction' : ''}" style="transform:translateY(${index * 34}px)"><span>${formatTime(frame.timestamp)}</span><span>0x${hex(frame.id,frame.extended?8:3)}</span><span>${frame.extended ? 'EXT' : 'STD'}${frame.localTx ? ' · TX' : ''}</span><span class="type">${frame.type}</span><span>${frame.node ?? '—'}</span><span class="sdo">${frame.sdo || '—'}</span><span>${frame.dlc}</span><span class="data">${bytes || (frame.remote ? 'RTR' : '—')}</span></div>`;
   }
   $('frame-rows').innerHTML = html;
 }
@@ -240,11 +320,142 @@ function flushFrames(): void {
   flushTimer = window.setTimeout(flushFrames, 100);
 }
 
+function renderTxControls(): void {
+  const periodic = txStatus.periodic_active;
+  const busy = txStatus.transmitting || txStatus.queue_depth > 0;
+  const modeStatus = $('tx-mode-status');
+  modeStatus.className = `tx-mode-status ${periodic ? 'periodic' : busy ? 'pending' : 'idle'}`;
+  modeStatus.innerHTML = `<span class="dot"></span><strong>${periodic ? `Периодическая · ${formatInt(txStatus.periodic_period_ms)} мс` : busy ? 'Передача…' : 'Готово'}</strong>`;
+  const badge = $('tx-mode-badge');
+  badge.toggleAttribute('hidden', !periodic);
+  text('tx-mode-badge', periodic ? 'ТАЙМЕР' : '');
+  $('tx-tab-button').classList.toggle('tx-active', periodic);
+  text('tx-mode-detail', periodic
+    ? `${txMode.bitrate_kbps} кбит/с · выполнено ${formatInt(txStatus.periodic_attempts)} · передача остаётся включённой до остановки таймера`
+    : `${txMode.bitrate_kbps ? `${txMode.bitrate_kbps} кбит/с · ${txMode.sync_state}` : 'Скорость шины ещё не определена'} · после разового запроса передача выключается автоматически`);
+  $<HTMLButtonElement>('tx-send').disabled = !txMode.bitrate_kbps;
+  $<HTMLButtonElement>('tx-periodic-start').disabled = periodic || !txMode.bitrate_kbps;
+  $<HTMLButtonElement>('tx-periodic-stop').disabled = !periodic;
+  $<HTMLButtonElement>('tx-cancel-last').disabled = !lastSubmittedSequence;
+  $('tx-statistics').innerHTML = [
+    ['Очередь', `${txStatus.queue_depth} / ${txStatus.queue_capacity}`, txStatus.transmitting ? 'mailbox занят' : 'ожидание'],
+    ['Отправлено', formatInt(txStatus.sent), `принято: ${formatInt(txStatus.queued)}`],
+    ['Arbitration lost', formatInt(txStatus.arbitration_lost), `таймауты: ${formatInt(txStatus.timeouts)}`],
+    ['Bus-off / ошибки', `${formatInt(txStatus.bus_off)} / ${formatInt(txStatus.errors)}`, periodic ? `таймер: ${formatInt(txStatus.periodic_attempts)}` : `до ${txStatus.rate_limit_fps} кадров/с`]
+  ].map(([label,value,note]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(note)}</small></div>`).join('');
+}
+
+async function refreshTx(showError = false): Promise<void> {
+  try {
+    [txMode, txStatus] = await Promise.all([
+      api<CanModeStatus>('/api/v1/can/mode'),
+      api<CanTxStatus>('/api/v1/can/tx')
+    ]);
+    if (lastSubmittedSequence && txStatus.last_sequence >= lastSubmittedSequence) lastSubmittedSequence = 0;
+    renderTxControls();
+  } catch (error) {
+    if (showError) notify(error instanceof Error ? error.message : 'Состояние TX недоступно', true);
+  }
+}
+
+async function refreshTxHistory(showError = false): Promise<void> {
+  const target = $('tx-history');
+  try {
+    const result = await api<{ count: number; items: CanTxHistoryEntry[] }>('/api/v1/can/tx/history');
+    if (!result.items.length) {
+      target.className = 'tx-history empty-state';
+      target.textContent = 'Передач ещё не было';
+      return;
+    }
+    target.className = 'tx-history';
+    target.innerHTML = result.items.map(entry => {
+      const bytes = sdoValueBytes(entry.command);
+      const value = bytes ? `0x${hex(entry.value, bytes * 2)}` : entry.raw.map(byte => hex(byte, 2)).join(' ');
+      const attempts = entry.periodic ? `<small>× ${formatInt(entry.attempt_count)}</small>` : '';
+      return `<div class="tx-history-row tx-history-grid${entry.periodic ? ' periodic' : ''}"><span>${entry.periodic ? '↻ ' : ''}#${entry.sequence}</span><span>${formatTime(entry.timestamp_us)}</span><span>${entry.node_id}</span><span>${escapeHtml(sdoCommandName(entry.command))}</span><span>0x${hex(entry.index, 4)}</span><span>0x${hex(entry.subindex, 2)}</span><span>${value}${attempts}</span><span class="tx-result-${escapeHtml(entry.result)}">${escapeHtml(txResultName(entry.result))}</span></div>`;
+    }).join('');
+  } catch (error) {
+    if (showError) notify(error instanceof Error ? error.message : 'Журнал TX недоступен', true);
+  }
+}
+
+function updateSdoForm(): void {
+  const command = $<HTMLSelectElement>('tx-command').value as SdoCommand;
+  const bytes = sdoValueBytes(command);
+  const value = $<HTMLInputElement>('tx-value');
+  value.disabled = bytes === 0;
+  value.maxLength = Math.max(2, bytes * 2);
+  value.placeholder = bytes ? `${bytes * 2} hex-символов максимум` : 'Для чтения значение не передаётся';
+}
+
+async function submitTxFrame(periodic = false): Promise<void> {
+  const nodeId = Number($<HTMLInputElement>('tx-node').value);
+  const command = $<HTMLSelectElement>('tx-command').value as SdoCommand;
+  const indexText = $<HTMLInputElement>('tx-index').value.trim();
+  const subindexText = $<HTMLInputElement>('tx-subindex').value.trim();
+  const valueText = $<HTMLInputElement>('tx-value').value.trim();
+  const timeout = Number($<HTMLInputElement>('tx-timeout').value);
+  const period = Number($<HTMLInputElement>('tx-period').value);
+  if (!Number.isInteger(nodeId) || nodeId < 1 || nodeId > 127) { notify('Node ID должен быть от 1 до 127', true); return; }
+  if (!/^[0-9a-f]{1,4}$/i.test(indexText)) { notify('Объект должен быть hex-числом 0000…FFFF без 0x', true); return; }
+  if (!/^[0-9a-f]{1,2}$/i.test(subindexText)) { notify('Субиндекс должен быть hex-числом 00…FF без 0x', true); return; }
+  if (!Number.isInteger(timeout) || timeout < 10 || timeout > 1000) { notify('Timeout должен быть от 10 до 1000 мс', true); return; }
+  if (periodic && (!Number.isInteger(period) || period < 50 || period > 3600000 || period < timeout)) { notify('Период должен быть от 50 до 3 600 000 мс и не короче Timeout', true); return; }
+  const bytes = sdoValueBytes(command);
+  if (bytes && (!new RegExp(`^[0-9a-f]{1,${bytes * 2}}$`, 'i').test(valueText))) { notify(`Значение должно помещаться в ${bytes * 8} бит`, true); return; }
+  const body = {
+    node_id: nodeId,
+    command,
+    index: Number.parseInt(indexText, 16),
+    subindex: Number.parseInt(subindexText, 16),
+    value: bytes ? Number.parseInt(valueText, 16) : 0,
+    timeout_ms: timeout,
+    ...(periodic ? { period_ms: period } : {})
+  };
+  try {
+    const result = await api<{ sequence: number; status: string; period_ms: number }>('/api/v1/can/tx', { method: 'POST', body: JSON.stringify(body) });
+    if (!periodic) lastSubmittedSequence = result.sequence;
+    notify(periodic ? `Периодический SDO-запрос #${result.sequence} запущен` : `SDO-запрос #${result.sequence} поставлен в очередь`);
+    await refreshTx();
+    window.setTimeout(() => void refreshTxHistory(), 250);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'Кадр не поставлен в очередь', true);
+  }
+}
+
+async function stopPeriodicTx(): Promise<void> {
+  try {
+    await api('/api/v1/can/tx/periodic', { method: 'DELETE', body: '{}' });
+    notify('Периодическая передача остановлена');
+    await refreshTx();
+    await refreshTxHistory();
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'Не удалось остановить таймер', true);
+  }
+}
+
+async function cancelLastTx(): Promise<void> {
+  if (!lastSubmittedSequence) return;
+  const sequence = lastSubmittedSequence;
+  try {
+    await api(`/api/v1/can/tx/${sequence}/cancel`, { method: 'POST', body: '{}' });
+    notify(`Отмена кадра #${sequence} запрошена`);
+    window.setTimeout(() => { void refreshTx(); void refreshTxHistory(); }, 150);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'Кадр уже завершён', true);
+    lastSubmittedSequence = 0;
+    renderTxControls();
+  }
+}
+
 async function refreshStatus(): Promise<void> {
   try {
-    const [state, stats, logger] = await Promise.all([api<DeviceState>('/api/v1/state'), api<Statistics>('/api/v1/statistics'), api<LoggerConfig>('/api/v1/config/logger')]);
+    const [state, stats, logger, mode, tx] = await Promise.all([api<DeviceState>('/api/v1/state'), api<Statistics>('/api/v1/statistics'), api<LoggerConfig>('/api/v1/config/logger'), api<CanModeStatus>('/api/v1/can/mode'), api<CanTxStatus>('/api/v1/can/tx')]);
     loggerConfig = logger;
+    txMode = mode;
+    txStatus = tx;
     renderLoggerControls();
+    renderTxControls();
     text('firmware', `FW ${state.firmware}`);
     text('can-rate', state.can.bitrate_kbps ? `${state.can.bitrate_kbps} кбит/с` : 'Авто');
     text('can-state', state.can.state);
@@ -255,6 +466,7 @@ async function refreshStatus(): Promise<void> {
     text('log-mode', modeName(state.storage.mode));
     text('log-file', state.storage.file || state.storage.state);
     text('log-free', formatBytes(logger.free_bytes || 0));
+    if (tx.periodic_active && $('tab-transmit').classList.contains('active')) void refreshTxHistory();
   } catch (error) {
     if (!ws || ws.readyState !== WebSocket.OPEN) setConnection('offline','Устройство недоступно');
   } finally { window.setTimeout(refreshStatus, 2000); }
@@ -332,9 +544,11 @@ async function loadNodeEvents(nodeId: number, showError: boolean): Promise<void>
     target.innerHTML = [...result.items].reverse().map(event => {
       const object = event.has_sdo_address ? `0x${hex(event.index,4)}` : '—';
       const subindex = event.has_sdo_address ? hex(event.subindex,2) : '—';
-      const data = event.remote ? 'RTR' : spacedHex(event.data, event.has_sdo_address ? event.data_offset : 0) || '—';
+      const data = describeSdoData(event);
       const statusClass = event.sdo_status === 'completed' ? 'ok' : event.sdo_status === 'none' || event.sdo_status === 'waiting' ? '' : 'warn';
-      return `<div class="event-row event-grid"><span>${formatTime(event.timestamp_us)}</span><span>${event.has_response_time ? `${formatInt(event.response_time_us)} мкс` : '—'}</span><span>0x${hex(event.id,event.extended?8:3)}<small>${event.extended ? 'EXT' : 'STD'}</small></span><span>${escapeHtml(event.type)}</span><span>${object}</span><span>${subindex}</span><span class="data">${data}</span><span class="${statusClass}">${escapeHtml(statusName(event.sdo_status))}${event.abort_code ? `<small>0x${hex(event.abort_code,8)}</small>` : ''}</span></div>`;
+      const localLabel = event.local_transaction ? (event.local_tx ? 'LOCAL TX' : 'LOCAL RESP') : '';
+      const statusDetail = event.sdo_status === 'aborted' && event.abort_code ? `${sdoAbortName(event.abort_code)} · 0x${hex(event.abort_code, 8)}` : event.sdo_status === 'timeout' ? 'Истёк таймаут транзакции' : '';
+      return `<div class="event-row event-grid${event.local_transaction ? ' local-transaction' : ''}"><span>${formatTime(event.timestamp_us)}</span><span>${event.has_response_time ? `${formatInt(event.response_time_us)} мкс` : '—'}</span><span>0x${hex(event.id,event.extended?8:3)}<small>${event.extended ? 'EXT' : 'STD'}${localLabel ? ` · ${localLabel}` : ''}</small></span><span>${escapeHtml(event.type)}</span><span>${object}</span><span>${subindex}</span><span class="data"${data.title ? ` title="${escapeHtml(data.title)}"` : ''}><strong>${escapeHtml(data.main)}</strong>${data.detail ? `<small>${escapeHtml(data.detail)}</small>` : ''}</span><span class="${statusClass}">${escapeHtml(statusName(event.sdo_status))}${statusDetail ? `<small>${escapeHtml(statusDetail)}</small>` : ''}</span></div>`;
     }).join('');
   } catch (error) { if (showError) notify(error instanceof Error ? error.message : 'Не удалось загрузить события', true); }
 }
@@ -425,6 +639,7 @@ function bindUi(): void {
     button.classList.add('active'); $(`tab-${button.dataset.tab}`).classList.add('active');
     if (button.dataset.tab === 'logs') void refreshLogs();
     if (button.dataset.tab === 'settings') void loadSettings();
+    if (button.dataset.tab === 'transmit') { void refreshTx(true); void refreshTxHistory(); }
   });
   ['frame-search','type-filter','node-filter'].forEach(id => $(id).addEventListener('input', () => { filterDirty = true; renderVisibleFrames(); }));
   $('frame-viewport').addEventListener('scroll', renderVisibleFrames, { passive: true });
@@ -479,10 +694,18 @@ function bindUi(): void {
   };
   $('start-recording').onclick = () => void loggerCommand('start');
   $('stop-recording').onclick = () => void loggerCommand('stop');
+  $<HTMLFormElement>('tx-form').onsubmit = event => { event.preventDefault(); void submitTxFrame(); };
+  $('tx-command').onchange = updateSdoForm;
+  updateSdoForm();
+  $('tx-periodic-start').onclick = () => void submitTxFrame(true);
+  $('tx-periodic-stop').onclick = () => void stopPeriodicTx();
+  $('tx-cancel-last').onclick = () => void cancelLastTx();
+  $('refresh-tx-history').onclick = () => void refreshTxHistory(true);
 }
 
 bindUi();
 renderLoggerControls();
+renderTxControls();
 connectStream();
 void refreshStatus();
 void refreshNodes();

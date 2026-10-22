@@ -6,6 +6,7 @@
 
 #define CAN_FRAME_FLAG_EXTENDED  (1U << 0)
 #define CAN_FRAME_FLAG_REMOTE    (1U << 1)
+#define CAN_FRAME_FLAG_LOCAL_TX  (1U << 2)
 
 typedef struct
 {
@@ -25,6 +26,22 @@ typedef enum
   CAN_SYNC_MANUAL
 } CanSyncState;
 
+typedef enum
+{
+  CAN_OPERATING_SILENT = 0,
+  CAN_OPERATING_ACTIVE_PENDING,
+  CAN_OPERATING_ACTIVE
+} CanOperatingMode;
+
+typedef enum
+{
+  CAN_SAFETY_POWER_ON = 0,
+  CAN_SAFETY_USER,
+  CAN_SAFETY_BITRATE_CHANGE,
+  CAN_SAFETY_BUS_OFF,
+  CAN_SAFETY_CONTROLLER_ERROR
+} CanSafetyReason;
+
 typedef struct
 {
   uint32_t bitrate_kbps;
@@ -34,6 +51,9 @@ typedef struct
   uint32_t gui_overflows;
   uint32_t errors;
   uint16_t bus_load_permille;
+  CanOperatingMode operating_mode;
+  CanSafetyReason safety_reason;
+  bool tx_gate_enabled;
 } CanCaptureStatus;
 
 void CanCapture_Init(void);
@@ -45,9 +65,18 @@ void CanCapture_TimerIRQHandler(void);
 
 void CanControl_Task(void);
 void CanControl_RequestBitrate(uint32_t bitrate_kbps);
+bool CanControl_RequestActive(bool confirmed);
+void CanControl_RequestSilent(void);
+void CanControl_ForceSilent(CanSafetyReason reason);
+bool CanControl_IsActive(void);
+const char *CanControl_OperatingModeName(CanOperatingMode mode);
+const char *CanControl_SafetyReasonName(CanSafetyReason reason);
 void CanControl_GetStatus(CanCaptureStatus *status);
 void CanControl_AddGuiOverflow(void);
 void CanControl_ResetStatistics(void);
 uint32_t CanCapture_GetTimestampUs(void);
+void CanCapture_GetTimestamps(uint32_t *timestamp_us,
+                              uint32_t *capture_time_us,
+                              uint32_t *capture_time_high_value);
 
 #endif

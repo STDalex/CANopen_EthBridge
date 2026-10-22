@@ -410,6 +410,11 @@
               <FilePath>../Core/Src/can_capture.c</FilePath>
             </File>
             <File>
+              <FileName>can_tx_manager.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/can_tx_manager.c</FilePath>
+            </File>
+            <File>
               <FileName>canopen_decoder.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/canopen_decoder.c</FilePath>

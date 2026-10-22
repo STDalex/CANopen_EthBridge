@@ -71,6 +71,7 @@ typedef struct
   uint32_t transferred_bytes;
   uint32_t abort_code;
   uint16_t segment_count;
+  bool local_transaction;
 } CanopenNodeEventSnapshot;
 
 void CanopenAnalyzer_Init(void);

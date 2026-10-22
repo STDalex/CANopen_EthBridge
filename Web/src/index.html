@@ -25,6 +25,7 @@
       <button class="active" data-tab="monitor">Поток</button>
       <button data-tab="nodes">Ноды <span id="node-count" class="badge">0</span></button>
       <button data-tab="logs">Логи</button>
+      <button id="tx-tab-button" data-tab="transmit">Передача <span id="tx-mode-badge" class="badge" hidden>ТАЙМЕР</span></button>
       <button data-tab="settings">Настройки</button>
       <button id="reset-statistics" class="reset-action" type="button">Сбросить статистику</button>
     </nav>
@@ -58,7 +59,7 @@
           <div class="section-title"><div><span class="eyebrow">Статистика</span><h2 id="node-title">Выберите ноду</h2></div><button id="toggle-node-log" class="secondary" disabled>В лог</button></div>
           <div id="node-summary" class="detail-metrics"></div>
           <div class="subtabs"><button class="active" data-node-view="events">События</button><button data-node-view="objects">SDO объекты</button></div>
-          <div class="event-head event-grid"><span>Время</span><span>Задержка</span><span>CAN ID</span><span>Тип</span><span>Объект</span><span>Sub</span><span>Данные (LSB)</span><span>Статус</span></div>
+          <div class="event-head event-grid"><span>Время</span><span>Задержка</span><span>CAN ID</span><span>Тип</span><span>Объект</span><span>Sub</span><span>Значение / расшифровка</span><span>Результат</span></div>
           <div id="node-events" class="event-list empty-state">Здесь появятся события выбранной ноды</div>
         </aside>
       </div>
@@ -69,6 +70,44 @@
       <div class="panel">
         <div class="section-title"><div><span class="eyebrow">microSD</span><h2>Завершённые логи</h2></div><button id="refresh-logs" class="secondary">Обновить</button></div>
         <div id="log-list" class="log-list empty-state">Список логов ещё не загружен</div>
+      </div>
+    </section>
+
+    <section id="tab-transmit" class="tab">
+      <div class="tx-layout">
+        <form id="tx-form" class="panel form-card tx-form">
+          <div class="section-title">
+            <div><span class="eyebrow">CANopen SDO client</span><h2>SDO-запрос</h2></div>
+            <div id="tx-mode-status" class="tx-mode-status idle"><span class="dot"></span><strong>Готово</strong></div>
+          </div>
+          <div class="tx-safety-note">Отправляются только expedited SDO-запросы. COB-ID клиента вычисляется как 0x600 + Node ID, DLC всегда равен 8.</div>
+          <div class="form-grid tx-fields">
+            <label>Node ID<input id="tx-node" type="number" min="1" max="127" value="1" required></label>
+            <label>Операция<select id="tx-command"><option value="read">Чтение</option><option value="write_u8">Запись 8 бит</option><option value="write_u16">Запись 16 бит</option><option value="write_u24">Запись 24 бита</option><option value="write_u32">Запись 32 бита</option></select></label>
+            <label>Объект, hex<input id="tx-index" value="1018" maxlength="4" autocomplete="off" spellcheck="false"></label>
+            <label>Субиндекс, hex<input id="tx-subindex" value="01" maxlength="2" autocomplete="off" spellcheck="false"></label>
+            <label class="tx-data-field">Значение, hex<input id="tx-value" value="0" maxlength="8" autocomplete="off" spellcheck="false" disabled></label>
+            <label>Timeout, мс<input id="tx-timeout" type="number" min="10" max="1000" value="100" required></label>
+            <label>Период, мс<input id="tx-period" type="number" min="50" max="3600000" value="1000" required></label>
+          </div>
+          <div class="tx-actions">
+            <button id="tx-send" type="submit">Отправить один раз</button>
+            <button id="tx-periodic-start" type="button" class="secondary">Запустить периодически</button>
+            <button id="tx-periodic-stop" type="button" class="danger" disabled>Остановить таймер</button>
+            <button id="tx-cancel-last" type="button" class="secondary" disabled>Отменить последний</button>
+          </div>
+        </form>
+
+        <aside class="panel tx-control">
+          <div><span class="eyebrow">SDO client</span><h2>Состояние передачи</h2></div>
+          <p id="tx-mode-detail" class="hint">Получение состояния…</p>
+          <div id="tx-statistics" class="detail-metrics tx-metrics"></div>
+        </aside>
+      </div>
+      <div class="panel tx-history-panel">
+        <div class="section-title"><div><span class="eyebrow">TX journal</span><h2>Последние результаты</h2></div><button id="refresh-tx-history" type="button" class="ghost">Обновить</button></div>
+        <div class="tx-history-head tx-history-grid"><span>Seq</span><span>Время</span><span>Node</span><span>Операция</span><span>Объект</span><span>Sub</span><span>Значение / raw</span><span>Результат</span></div>
+        <div id="tx-history" class="tx-history empty-state">Передач ещё не было</div>
       </div>
     </section>
 

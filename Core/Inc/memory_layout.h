@@ -3,8 +3,10 @@
 
 /* STM32F746G-DISCO external SDRAM: 0xC0000000..0xC07FFFFF.
    The LTDC framebuffer starts at 0xC0000000 and occupies 261120 bytes.
-   Stage 3 deliberately leaves the remainder of the first MiB unused, then
-   reserves a contiguous 2 MiB logger pool and its RTOS working area. */
+   The next 256 KiB are reserved for the LVGL heap. The remainder of the
+   first MiB stays unused, followed by the logger pool and RTOS work areas. */
+#define LVGL_HEAP_BASE                       0xC0040000UL
+#define LVGL_HEAP_BYTES                      0x00040000UL
 #define CAN_LOG_SDRAM_BLOCK_POOL_BASE       0xC0100000UL
 #define CAN_LOG_SDRAM_BLOCK_POOL_BYTES      (2UL * 1024UL * 1024UL)
 #define STORAGE_TASK_STACK_WORDS            2048U
