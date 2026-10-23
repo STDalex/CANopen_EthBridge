@@ -167,6 +167,7 @@ static lv_obj_t *main_screen;
 static lv_obj_t *monitor_screen;
 static lv_obj_t *settings_screen;
 static lv_obj_t *network_screen;
+static lv_obj_t *error_screen;
 static lv_obj_t *nodes_screen;
 static lv_obj_t *node_events_screen;
 static lv_obj_t *info_screen;
@@ -248,6 +249,10 @@ static lv_obj_t *network_keyboard;
 static lv_obj_t *network_status_label;
 static lv_obj_t *network_active_field;
 static int32_t network_active_field_y;
+static lv_obj_t *error_summary_label;
+static lv_obj_t *error_protocol_label;
+static lv_obj_t *error_state_label;
+static lv_obj_t *error_last_label;
 static lv_obj_t *log_full_radio;
 static lv_obj_t *log_nodes_radio;
 static lv_obj_t *log_card_label;
@@ -319,6 +324,55 @@ static void Render_NodeRows(void);
 static void Refresh_LogStatus(void);
 static void Tx_RefreshStatus(void);
 static void Refresh_Scanner(void);
+
+static void Refresh_ErrorStatistics(const CanCaptureStatus *status)
+{
+  char text[192];
+  const CanErrorStatistics *errors;
+
+  if (status == NULL)
+  {
+    return;
+  }
+  errors = &status->error_statistics;
+  (void)snprintf(text, sizeof(text),
+                 "Interrupts: %lu     CAN RX: %lu     DROP: %lu",
+                 (unsigned long)errors->interrupts,
+                 (unsigned long)status->received,
+                 (unsigned long)(status->ring_overflows + status->gui_overflows +
+                                 CanopenAnalyzer_GetQueueOverflows()));
+  lv_label_set_text(error_summary_label, text);
+
+  (void)snprintf(text, sizeof(text),
+                 "PROTOCOL\nACK              %lu\nCRC              %lu\nStuff            %lu\n"
+                 "Form             %lu\nBit recessive    %lu\nBit dominant     %lu",
+                 (unsigned long)errors->ack,
+                 (unsigned long)errors->crc,
+                 (unsigned long)errors->stuff,
+                 (unsigned long)errors->form,
+                 (unsigned long)errors->bit_recessive,
+                 (unsigned long)errors->bit_dominant);
+  lv_label_set_text(error_protocol_label, text);
+
+  (void)snprintf(text, sizeof(text),
+                 "CONTROLLER\nWarning          %lu\nPassive          %lu\nBus-off          %lu\n"
+                 "Unclassified     %lu",
+                 (unsigned long)errors->warning,
+                 (unsigned long)errors->passive,
+                 (unsigned long)errors->bus_off,
+                 (unsigned long)errors->unclassified);
+  lv_label_set_text(error_state_label, text);
+
+  (void)snprintf(text, sizeof(text),
+                 "Last: %s at %lu.%03lu s    TEC:%u  REC:%u  ESR:0x%08lX",
+                 CanControl_ErrorName(errors->last_error),
+                 (unsigned long)(errors->last_timestamp_us / 1000000U),
+                 (unsigned long)((errors->last_timestamp_us / 1000U) % 1000U),
+                 (unsigned int)errors->last_tx_error_counter,
+                 (unsigned int)errors->last_rx_error_counter,
+                 (unsigned long)errors->last_esr);
+  lv_label_set_text(error_last_label, text);
+}
 
 static const UiBitrateOption *Find_BitrateOption(uint32_t bitrate_kbps)
 {
@@ -2366,6 +2420,7 @@ void Ui_Init(void)
   monitor_screen = lv_obj_create(NULL);
   settings_screen = lv_obj_create(NULL);
   network_screen = lv_obj_create(NULL);
+  error_screen = lv_obj_create(NULL);
   nodes_screen = lv_obj_create(NULL);
   node_events_screen = lv_obj_create(NULL);
   info_screen = lv_obj_create(NULL);
@@ -2377,6 +2432,7 @@ void Ui_Init(void)
   Style_Screen(monitor_screen);
   Style_Screen(settings_screen);
   Style_Screen(network_screen);
+  Style_Screen(error_screen);
   lv_obj_set_scrollable(network_screen, false);
   lv_obj_set_scrollbar_mode(network_screen, LV_SCROLLBAR_MODE_OFF);
   Style_Screen(nodes_screen);
@@ -2427,7 +2483,7 @@ void Ui_Init(void)
   tx_nav_button = Create_NavigationButton(main_screen, 166, 144, 148, 66,
                                            "CANopen SDO", tx_screen);
   (void)Create_NavigationButton(main_screen, 324, 144, 148, 66,
-                                "Network", network_screen);
+                                "Error Logs", error_screen);
   main_storage_label = Create_Label(main_screen, 16, 230, 448,
                                     "SD:No card  Off  LOST:0", lv_color_hex(0xA9C7D7));
   lv_obj_set_style_text_align(main_storage_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -2436,6 +2492,33 @@ void Ui_Init(void)
   main_log_button = Create_QuickLogButton(main_screen, 304, &main_log_button_label);
   (void)Create_NavigationButton(main_screen, 384, 3, 44, 34, "i", info_screen);
   (void)Create_NavigationButton(main_screen, 432, 3, 44, 34, LV_SYMBOL_SETTINGS, settings_screen);
+
+  (void)Create_NavigationButton(error_screen, 4, 3, 44, 34,
+                                LV_SYMBOL_HOME, main_screen);
+  title = Create_Label(error_screen, 58, 10, 410, "CAN Error Logs",
+                       lv_color_hex(0x65C7F7));
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+  error_summary_label = Create_Label(error_screen, 16, 48, 448,
+                                     "Interrupts: 0     CAN RX: 0     DROP: 0",
+                                     lv_color_hex(0xE8EEF2));
+  lv_obj_set_style_text_align(error_summary_label, LV_TEXT_ALIGN_CENTER, 0);
+  error_protocol_label = Create_Label(error_screen, 24, 82, 210,
+                                      "PROTOCOL\nACK              0\nCRC              0\n"
+                                      "Stuff            0\nForm             0\n"
+                                      "Bit recessive    0\nBit dominant     0",
+                                      lv_color_hex(0xE8EEF2));
+  lv_label_set_long_mode(error_protocol_label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_height(error_protocol_label, 138);
+  error_state_label = Create_Label(error_screen, 258, 82, 198,
+                                   "CONTROLLER\nWarning          0\nPassive          0\n"
+                                   "Bus-off          0\nUnclassified     0",
+                                   lv_color_hex(0xE8EEF2));
+  lv_label_set_long_mode(error_state_label, LV_LABEL_LONG_WRAP);
+  lv_obj_set_height(error_state_label, 110);
+  error_last_label = Create_Label(error_screen, 16, 228, 448,
+                                  "Last: none at 0.000 s    TEC:0  REC:0  ESR:0x00000000",
+                                  lv_color_hex(0xA9C7D7));
+  lv_obj_set_style_text_align(error_last_label, LV_TEXT_ALIGN_CENTER, 0);
 
   (void)Create_NavigationButton(scanner_screen, 4, 3, 44, 34,
                                 LV_SYMBOL_HOME, main_screen);
@@ -3188,6 +3271,7 @@ void Ui_TaskLoop(void)
     CanControl_GetStatus(&status);
     CanTx_GetStatus(&tx);
     CanScanner_GetStatus(&scanner_status);
+    Refresh_ErrorStatistics(&status);
     bridge_active = CanBridge_IsActive();
     state = (status.state == CAN_SYNC_LOCKED) ? "LOCK" :
             ((status.state == CAN_SYNC_MANUAL) ? "MAN" : "SCAN");

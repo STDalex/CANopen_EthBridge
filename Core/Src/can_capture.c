@@ -43,10 +43,11 @@ static volatile uint32_t received_count;
 static volatile uint32_t ring_overflow_count;
 static volatile uint32_t gui_overflow_count;
 static volatile uint32_t error_count;
+static volatile CanErrorStatistics error_statistics;
+static volatile uint32_t previous_error_state_flags;
 static volatile uint32_t received_statistics_base;
 static volatile uint32_t ring_overflow_statistics_base;
 static volatile uint32_t gui_overflow_statistics_base;
-static volatile uint32_t error_statistics_base;
 static volatile uint64_t estimated_busy_time_ns;
 static volatile uint64_t load_window_busy_base;
 static volatile uint32_t load_window_started_tick;
@@ -203,6 +204,8 @@ static bool ConfigureController(const CanTiming *timing, bool active)
 
   CAN1->IER = CAN_IER_FMPIE0 | CAN_IER_FOVIE0 | CAN_IER_EWGIE |
               CAN_IER_EPVIE | CAN_IER_BOFIE | CAN_IER_LECIE | CAN_IER_ERRIE;
+  previous_error_state_flags = CAN1->ESR &
+    (CAN_ESR_EWGF | CAN_ESR_EPVF | CAN_ESR_BOFF);
   active_bitrate = timing->bitrate_kbps;
   if (active)
   {
@@ -225,10 +228,11 @@ void CanCapture_Init(void)
   ring_overflow_count = 0U;
   gui_overflow_count = 0U;
   error_count = 0U;
+  error_statistics = (CanErrorStatistics){0};
+  previous_error_state_flags = 0U;
   received_statistics_base = 0U;
   ring_overflow_statistics_base = 0U;
   gui_overflow_statistics_base = 0U;
-  error_statistics_base = 0U;
   estimated_busy_time_ns = 0U;
   load_window_busy_base = 0U;
   load_window_started_tick = HAL_GetTick();
@@ -355,14 +359,91 @@ void CanCapture_RxIRQHandler(void)
 
 void CanCapture_ErrorIRQHandler(void)
 {
+  uint32_t esr = CAN1->ESR;
+  uint32_t lec = esr & CAN_ESR_LEC;
+  uint32_t state_flags = esr & (CAN_ESR_EWGF | CAN_ESR_EPVF | CAN_ESR_BOFF);
+  uint32_t entered_states = state_flags & ~previous_error_state_flags;
+  CanErrorKind last_error = CAN_ERROR_UNCLASSIFIED;
+  bool classified = false;
+
+  previous_error_state_flags = state_flags;
   ++error_count;
-  if ((CAN1->ESR & CAN_ESR_BOFF) != 0U)
+  ++error_statistics.interrupts;
+  if ((entered_states & CAN_ESR_EWGF) != 0U)
+  {
+    ++error_statistics.warning;
+    last_error = CAN_ERROR_WARNING;
+    classified = true;
+  }
+  if ((entered_states & CAN_ESR_EPVF) != 0U)
+  {
+    ++error_statistics.passive;
+    last_error = CAN_ERROR_PASSIVE;
+    classified = true;
+  }
+  if ((entered_states & CAN_ESR_BOFF) != 0U)
+  {
+    ++error_statistics.bus_off;
+    last_error = CAN_ERROR_BUS_OFF;
+    classified = true;
+    CanSafety_EmergencyDisableTx();
+    requested_active = false;
+    operating_mode = CAN_OPERATING_ACTIVE_PENDING;
+    safety_reason = CAN_SAFETY_BUS_OFF;
+  }
+  else if ((esr & CAN_ESR_BOFF) != 0U)
   {
     CanSafety_EmergencyDisableTx();
     requested_active = false;
     operating_mode = CAN_OPERATING_ACTIVE_PENDING;
     safety_reason = CAN_SAFETY_BUS_OFF;
   }
+  switch (lec)
+  {
+    case CAN_ESR_LEC_0:
+      ++error_statistics.stuff;
+      last_error = CAN_ERROR_STUFF;
+      classified = true;
+      break;
+    case CAN_ESR_LEC_1:
+      ++error_statistics.form;
+      last_error = CAN_ERROR_FORM;
+      classified = true;
+      break;
+    case CAN_ESR_LEC_1 | CAN_ESR_LEC_0:
+      ++error_statistics.ack;
+      last_error = CAN_ERROR_ACK;
+      classified = true;
+      break;
+    case CAN_ESR_LEC_2:
+      ++error_statistics.bit_recessive;
+      last_error = CAN_ERROR_BIT_RECESSIVE;
+      classified = true;
+      break;
+    case CAN_ESR_LEC_2 | CAN_ESR_LEC_0:
+      ++error_statistics.bit_dominant;
+      last_error = CAN_ERROR_BIT_DOMINANT;
+      classified = true;
+      break;
+    case CAN_ESR_LEC_2 | CAN_ESR_LEC_1:
+      ++error_statistics.crc;
+      last_error = CAN_ERROR_CRC;
+      classified = true;
+      break;
+    default:
+      break;
+  }
+  if (!classified)
+  {
+    ++error_statistics.unclassified;
+  }
+  error_statistics.last_error = last_error;
+  error_statistics.last_timestamp_us = TIM2->CNT - timestamp_epoch_us;
+  error_statistics.last_esr = esr;
+  error_statistics.last_tx_error_counter =
+    (uint8_t)((esr & CAN_ESR_TEC) >> CAN_ESR_TEC_Pos);
+  error_statistics.last_rx_error_counter =
+    (uint8_t)((esr & CAN_ESR_REC) >> CAN_ESR_REC_Pos);
   if ((CAN1->RF0R & CAN_RF0R_FOVR0) != 0U)
   {
     CAN1->RF0R = CAN_RF0R_FOVR0;
@@ -455,6 +536,24 @@ const char *CanControl_SafetyReasonName(CanSafetyReason reason)
   }
 }
 
+const char *CanControl_ErrorName(CanErrorKind error)
+{
+  switch (error)
+  {
+    case CAN_ERROR_STUFF: return "stuff";
+    case CAN_ERROR_FORM: return "form";
+    case CAN_ERROR_ACK: return "ack";
+    case CAN_ERROR_BIT_RECESSIVE: return "bit_recessive";
+    case CAN_ERROR_BIT_DOMINANT: return "bit_dominant";
+    case CAN_ERROR_CRC: return "crc";
+    case CAN_ERROR_WARNING: return "warning";
+    case CAN_ERROR_PASSIVE: return "passive";
+    case CAN_ERROR_BUS_OFF: return "bus_off";
+    case CAN_ERROR_UNCLASSIFIED: return "unclassified";
+    default: return "none";
+  }
+}
+
 void CanControl_GetStatus(CanCaptureStatus *status)
 {
   uint32_t now;
@@ -480,7 +579,8 @@ void CanControl_GetStatus(CanCaptureStatus *status)
   status->received = received_count - received_statistics_base;
   status->ring_overflows = ring_overflow_count - ring_overflow_statistics_base;
   status->gui_overflows = gui_overflow_count - gui_overflow_statistics_base;
-  status->errors = error_count - error_statistics_base;
+  status->error_statistics = error_statistics;
+  status->errors = status->error_statistics.interrupts;
   status->bus_load_permille = current_bus_load_permille;
   status->operating_mode = operating_mode;
   status->safety_reason = safety_reason;
@@ -503,7 +603,7 @@ void CanControl_ResetStatistics(void)
   received_statistics_base = received_count;
   ring_overflow_statistics_base = ring_overflow_count;
   gui_overflow_statistics_base = gui_overflow_count;
-  error_statistics_base = error_count;
+  error_statistics = (CanErrorStatistics){0};
   load_window_busy_base = estimated_busy_time_ns;
   load_window_started_tick = HAL_GetTick();
   current_bus_load_permille = 0U;
@@ -647,6 +747,7 @@ void CanControl_Task(void)
         sync_state = CAN_SYNC_LOCKED;
         taskENTER_CRITICAL();
         error_count = 0U;
+        error_statistics = (CanErrorStatistics){0};
         taskEXIT_CRITICAL();
         trial_start_errors = 0U;
       }

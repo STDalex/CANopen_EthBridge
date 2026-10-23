@@ -3,7 +3,9 @@ type ConnState = 'connecting' | 'online' | 'offline';
 type CanType = 'Unknown' | 'NMT' | 'SYNC' | 'EMCY' | 'TIME' | 'TPDO1' | 'RPDO1' | 'TPDO2' | 'RPDO2' | 'TPDO3' | 'RPDO3' | 'TPDO4' | 'RPDO4' | 'SDO Resp' | 'SDO Req' | 'HB/Guard' | 'LSS Tx' | 'LSS Rx';
 interface Frame { timestamp: number; id: number; extended: boolean; remote: boolean; localTx: boolean; dlc: number; data: Uint8Array; type: CanType; node?: number; sdo?: string; sequence: number }
 interface DeviceState { firmware: string; uptime_ms: number; network: { initialized: boolean; link_up: boolean; source: string; ip: string }; can: { state: string; bitrate_kbps: number; received: number; operating_mode: TxMode; tx_gate_enabled: boolean; safety_reason: string }; storage: { state: string; mode: string; file: string } }
-interface Statistics { can: { received: number; ring_overflows: number; gui_overflows: number; errors: number; bus_load_permille: number }; analyzer: { frames: number; unique_nodes: number; queue_overflows: number }; logger: { stored_frames: number; dropped_frames: number; write_errors: number; recoveries: number }; tx: { queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number }; websocket: { active: boolean; connections: number; batches: number; frames: number; lost_frames: number } }
+interface CanErrorCounters { interrupts: number; warning: number; passive: number; bus_off: number; stuff: number; form: number; ack: number; bit_recessive: number; bit_dominant: number; crc: number; unclassified: number }
+interface CanLastError { type: string; timestamp_us: number; esr: number; tx_error_counter: number; rx_error_counter: number }
+interface Statistics { can: { received: number; ring_overflows: number; gui_overflows: number; errors: number; bus_load_permille: number; error_counters: CanErrorCounters; last_error: CanLastError }; analyzer: { frames: number; unique_nodes: number; queue_overflows: number }; logger: { stored_frames: number; dropped_frames: number; write_errors: number; recoveries: number }; tx: { queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number }; websocket: { active: boolean; connections: number; batches: number; frames: number; lost_frames: number } }
 interface NodeInfo { node_id: number; last_type: string; first_seen_us: number; last_seen_us: number; frames: number; bytes: number; sdo_requests: number; sdo_responses: number; sdo_started: number; sdo_completed: number; sdo_aborted: number; sdo_timeouts: number; sdo_conflicts: number; sdo_orphans: number; sdo_protocol_errors: number; sdo_errors: number }
 interface NodeEvent { timestamp_us: number; id: number; type: string; sdo_status: string; index: number; subindex: number; response_time_us: number; transaction_time_us: number; transferred_bytes: number; abort_code: number; extended: boolean; remote: boolean; local_tx: boolean; local_transaction: boolean; dlc: number; has_response_time: boolean; has_sdo_address: boolean; data_offset: number; data: string }
 interface LoggerConfig { mode: 'full' | 'selected'; selected_nodes: number[]; recording: boolean; active_mode: 'off' | 'full' | 'selected'; card_state?: string; file?: string; file_size_bytes?: number; free_bytes?: number; stored_frames?: number; dropped_frames?: number; write_errors?: number; recoveries?: number; last_error?: number; selected_node_count?: number }
@@ -55,6 +57,11 @@ let totalLiveFrames = 0;
 let txMode: CanModeStatus = { mode: 'silent', tx_gate_enabled: false, bitrate_kbps: 0, sync_state: 'searching', safety_reason: 'power_on', queue_depth: 0, transmitting: false, bridge_active: false };
 let txStatus: CanTxStatus = { queue_depth: 0, queue_capacity: 16, transmitting: false, queued: 0, sent: 0, cancelled: 0, timeouts: 0, arbitration_lost: 0, bus_off: 0, errors: 0, last_sequence: 0, last_result: 'mode_disabled', rate_limit_fps: 20, periodic_active: false, periodic_sequence: 0, periodic_period_ms: 0, periodic_attempts: 0 };
 let lastSubmittedSequence = 0;
+const emptyCanStatistics: Statistics['can'] = {
+  received: 0, ring_overflows: 0, gui_overflows: 0, errors: 0, bus_load_permille: 0,
+  error_counters: { interrupts: 0, warning: 0, passive: 0, bus_off: 0, stuff: 0, form: 0, ack: 0, bit_recessive: 0, bit_dominant: 0, crc: 0, unclassified: 0 },
+  last_error: { type: 'none', timestamp_us: 0, esr: 0, tx_error_counter: 0, rx_error_counter: 0 }
+};
 
 const escapeHtml = (value: unknown): string => String(value).replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c] || c));
 const hex = (value: number, width: number): string => value.toString(16).toUpperCase().padStart(width, '0');
@@ -64,6 +71,7 @@ const formatTime = (microseconds: number): string => `${Math.floor(microseconds 
 const modeName = (mode: string): string => ({ off: 'Выключена', full: 'Все кадры', selected: 'Выбранные ноды' }[mode] || mode);
 const statusName = (status: string): string => ({ none: '—', waiting: 'ожидание ответа', completed: 'успешно', aborted: 'отказ ноды (SDO Abort)', timeout: 'нет ответа', ambiguous: 'неоднозначный ответ', protocol_error: 'ошибка протокола', orphan: 'ответ без запроса' }[status] || status);
 const txResultName = (result: string): string => ({ sent: 'Отправлен', cancelled: 'Отменён', timeout: 'Таймаут', arbitration_lost: 'Arbitration lost', bus_off: 'Bus-off', driver_error: 'Ошибка драйвера', mode_disabled: 'SILENT' }[result] || result);
+const canErrorName = (error: string): string => ({ none: 'Нет', stuff: 'Stuff error', form: 'Form error', ack: 'ACK error', bit_recessive: 'Bit recessive', bit_dominant: 'Bit dominant', crc: 'CRC error', warning: 'Error warning', passive: 'Error passive', bus_off: 'Bus-off', unclassified: 'Неклассифицированная' }[error] || error);
 const sdoCommandName = (command: SdoCommand): string => ({ read: 'Чтение', write_u8: 'Запись 8', write_u16: 'Запись 16', write_u24: 'Запись 24', write_u32: 'Запись 32' }[command]);
 const sdoValueBytes = (command: SdoCommand): number => ({ read: 0, write_u8: 1, write_u16: 2, write_u24: 3, write_u32: 4 }[command]);
 const nodeErrorCount = (node: NodeInfo): number => node.sdo_aborted + node.sdo_timeouts + node.sdo_protocol_errors + node.sdo_conflicts + node.sdo_orphans;
@@ -466,6 +474,7 @@ async function refreshStatus(): Promise<void> {
     text('traffic-total', `${formatInt(stats.can.received)} кадров`);
     text('can-drops', formatInt(stats.can.ring_overflows + stats.can.gui_overflows + stats.analyzer.queue_overflows));
     text('can-errors', formatInt(stats.can.errors));
+    renderErrorStatistics(stats.can);
     text('log-mode', modeName(state.storage.mode));
     text('log-file', state.storage.file || state.storage.state);
     text('log-free', formatBytes(logger.free_bytes || 0));
@@ -473,6 +482,30 @@ async function refreshStatus(): Promise<void> {
   } catch (error) {
     if (!ws || ws.readyState !== WebSocket.OPEN) setConnection('offline','Устройство недоступно');
   } finally { window.setTimeout(refreshStatus, 2000); }
+}
+
+function renderErrorStatistics(can: Statistics['can']): void {
+  if (!can.error_counters || !can.last_error) return;
+  const counters: Array<[string, number, string]> = [
+    ['ACK', can.error_counters.ack, 'нет подтверждения передачи'],
+    ['CRC', can.error_counters.crc, 'ошибка контрольной суммы'],
+    ['Stuff', can.error_counters.stuff, 'нарушение bit stuffing'],
+    ['Form', can.error_counters.form, 'ошибка формата кадра'],
+    ['Bit recessive', can.error_counters.bit_recessive, 'ожидался recessive bit'],
+    ['Bit dominant', can.error_counters.bit_dominant, 'ожидался dominant bit'],
+    ['Warning', can.error_counters.warning, 'контроллер достиг warning level'],
+    ['Passive', can.error_counters.passive, 'контроллер перешёл в error-passive'],
+    ['Bus-off', can.error_counters.bus_off, 'контроллер отключён от шины'],
+    ['Прочие', can.error_counters.unclassified, 'без конкретного кода LEC']
+  ];
+  text('error-total', `${formatInt(can.error_counters.interrupts)} прерываний`);
+  $('error-counter-grid').innerHTML = counters.map(([label, value, note]) =>
+    `<article class="${value ? 'has-error' : ''}"><span>${escapeHtml(label)}</span><strong>${formatInt(value)}</strong><small>${escapeHtml(note)}</small></article>`
+  ).join('');
+  text('error-last-type', canErrorName(can.last_error.type));
+  text('error-last-time', can.last_error.type === 'none' ? '—' : formatTime(can.last_error.timestamp_us));
+  text('error-last-counters', `${formatInt(can.last_error.tx_error_counter)} / ${formatInt(can.last_error.rx_error_counter)}`);
+  text('error-last-esr', `0x${hex(can.last_error.esr >>> 0, 8)}`);
 }
 
 function renderNodes(): void {
@@ -629,6 +662,7 @@ async function resetStatistics(): Promise<void> {
     text('traffic-total', '0 кадров');
     text('can-drops', '0');
     text('can-errors', '0');
+    renderErrorStatistics(emptyCanStatistics);
     await refreshNodes();
     notify('Статистика сброшена');
   } catch (error) { notify(error instanceof Error ? error.message : 'Не удалось сбросить статистику', true); }
@@ -707,6 +741,7 @@ function bindUi(): void {
 }
 
 bindUi();
+renderErrorStatistics(emptyCanStatistics);
 renderLoggerControls();
 renderTxControls();
 connectStream();

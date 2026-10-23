@@ -45,6 +45,41 @@ typedef enum
   CAN_SAFETY_CONTROLLER_ERROR
 } CanSafetyReason;
 
+typedef enum
+{
+  CAN_ERROR_NONE = 0,
+  CAN_ERROR_STUFF,
+  CAN_ERROR_FORM,
+  CAN_ERROR_ACK,
+  CAN_ERROR_BIT_RECESSIVE,
+  CAN_ERROR_BIT_DOMINANT,
+  CAN_ERROR_CRC,
+  CAN_ERROR_WARNING,
+  CAN_ERROR_PASSIVE,
+  CAN_ERROR_BUS_OFF,
+  CAN_ERROR_UNCLASSIFIED
+} CanErrorKind;
+
+typedef struct
+{
+  uint32_t interrupts;
+  uint32_t warning;
+  uint32_t passive;
+  uint32_t bus_off;
+  uint32_t stuff;
+  uint32_t form;
+  uint32_t ack;
+  uint32_t bit_recessive;
+  uint32_t bit_dominant;
+  uint32_t crc;
+  uint32_t unclassified;
+  uint32_t last_timestamp_us;
+  uint32_t last_esr;
+  uint8_t last_tx_error_counter;
+  uint8_t last_rx_error_counter;
+  CanErrorKind last_error;
+} CanErrorStatistics;
+
 typedef struct
 {
   uint32_t bitrate_kbps;
@@ -53,6 +88,7 @@ typedef struct
   uint32_t ring_overflows;
   uint32_t gui_overflows;
   uint32_t errors;
+  CanErrorStatistics error_statistics;
   uint16_t bus_load_permille;
   CanOperatingMode operating_mode;
   CanSafetyReason safety_reason;
@@ -75,6 +111,7 @@ void CanControl_ForceSilent(CanSafetyReason reason);
 bool CanControl_IsActive(void);
 const char *CanControl_OperatingModeName(CanOperatingMode mode);
 const char *CanControl_SafetyReasonName(CanSafetyReason reason);
+const char *CanControl_ErrorName(CanErrorKind error);
 void CanControl_GetStatus(CanCaptureStatus *status);
 void CanControl_AddGuiOverflow(void);
 void CanControl_ResetStatistics(void);

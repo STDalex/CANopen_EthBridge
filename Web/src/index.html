@@ -26,6 +26,7 @@
       <button data-tab="nodes">Ноды <span id="node-count" class="badge">0</span></button>
       <button data-tab="logs">Логи</button>
       <button id="tx-tab-button" data-tab="transmit">Передача <span id="tx-mode-badge" class="badge" hidden>ТАЙМЕР</span></button>
+      <button data-tab="errors">Ошибки CAN</button>
       <button data-tab="settings">Настройки</button>
       <button id="reset-statistics" class="reset-action" type="button">Сбросить статистику</button>
     </nav>
@@ -108,6 +109,24 @@
         <div class="section-title"><div><span class="eyebrow">TX journal</span><h2>Последние результаты</h2></div><button id="refresh-tx-history" type="button" class="ghost">Обновить</button></div>
         <div class="tx-history-head tx-history-grid"><span>Seq</span><span>Время</span><span>Node</span><span>Операция</span><span>Объект</span><span>Sub</span><span>Значение / raw</span><span>Результат</span></div>
         <div id="tx-history" class="tx-history empty-state">Передач ещё не было</div>
+      </div>
+    </section>
+
+    <section id="tab-errors" class="tab">
+      <div class="error-layout">
+        <div class="panel">
+          <div class="section-title"><div><span class="eyebrow">Контроллер CAN</span><h2>Подробная статистика ошибок</h2></div><strong id="error-total">0 прерываний</strong></div>
+          <div id="error-counter-grid" class="error-counter-grid"></div>
+        </div>
+        <aside class="panel error-last-panel">
+          <div><span class="eyebrow">Последняя ошибка</span><h2 id="error-last-type">Нет</h2></div>
+          <div class="error-last-values">
+            <div><span>Время</span><strong id="error-last-time">—</strong></div>
+            <div><span>TEC / REC</span><strong id="error-last-counters">0 / 0</strong></div>
+            <div><span>ESR</span><strong id="error-last-esr">0x00000000</strong></div>
+          </div>
+          <p class="hint">ACK — переданный кадр никто не подтвердил. CRC, Stuff и Form указывают на повреждение кадра или рассинхронизацию. TEC/REC — аппаратные счётчики ошибок передачи и приёма в момент последнего события.</p>
+        </aside>
       </div>
     </section>
 

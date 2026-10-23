@@ -2334,7 +2334,33 @@ static void HandleStatistics(struct netconn *connection)
   WriterBegin(&writer, connection, "200 OK");
   WriterPrintf(&writer,
     "{\"can\":{\"received\":%lu,\"ring_overflows\":%lu,\"gui_overflows\":%lu,"
-    "\"errors\":%lu,\"bus_load_permille\":%u},"
+    "\"errors\":%lu,\"bus_load_permille\":%u,"
+    "\"error_counters\":{\"interrupts\":%lu,\"warning\":%lu,"
+    "\"passive\":%lu,\"bus_off\":%lu,\"stuff\":%lu,\"form\":%lu,"
+    "\"ack\":%lu,\"bit_recessive\":%lu,\"bit_dominant\":%lu,"
+    "\"crc\":%lu,\"unclassified\":%lu},"
+    "\"last_error\":{\"type\":\"%s\",\"timestamp_us\":%lu,"
+    "\"esr\":%lu,\"tx_error_counter\":%u,\"rx_error_counter\":%u}},",
+    (unsigned long)capture.received, (unsigned long)capture.ring_overflows,
+    (unsigned long)capture.gui_overflows, (unsigned long)capture.errors,
+    (unsigned int)capture.bus_load_permille,
+    (unsigned long)capture.error_statistics.interrupts,
+    (unsigned long)capture.error_statistics.warning,
+    (unsigned long)capture.error_statistics.passive,
+    (unsigned long)capture.error_statistics.bus_off,
+    (unsigned long)capture.error_statistics.stuff,
+    (unsigned long)capture.error_statistics.form,
+    (unsigned long)capture.error_statistics.ack,
+    (unsigned long)capture.error_statistics.bit_recessive,
+    (unsigned long)capture.error_statistics.bit_dominant,
+    (unsigned long)capture.error_statistics.crc,
+    (unsigned long)capture.error_statistics.unclassified,
+    CanControl_ErrorName(capture.error_statistics.last_error),
+    (unsigned long)capture.error_statistics.last_timestamp_us,
+    (unsigned long)capture.error_statistics.last_esr,
+    (unsigned int)capture.error_statistics.last_tx_error_counter,
+    (unsigned int)capture.error_statistics.last_rx_error_counter);
+  WriterPrintf(&writer,
     "\"analyzer\":{\"frames\":%lu,\"unique_nodes\":%lu,\"queue_overflows\":%lu},"
     "\"logger\":{\"stored_frames\":%llu,\"dropped_frames\":%llu,"
     "\"write_errors\":%lu,\"recoveries\":%lu},"
@@ -2344,9 +2370,7 @@ static void HandleStatistics(struct netconn *connection)
     "\"websocket\":{\"active\":%s,\"connections\":%lu,\"batches\":%lu,"
     "\"frames\":%lu,\"lost_frames\":%lu},"
     "\"downloads\":{\"requests\":%lu,\"completed\":%lu,\"bytes\":%llu}}\n",
-    (unsigned long)capture.received, (unsigned long)capture.ring_overflows,
-    (unsigned long)capture.gui_overflows, (unsigned long)capture.errors,
-    (unsigned int)capture.bus_load_permille, (unsigned long)analyzer.frame_count,
+    (unsigned long)analyzer.frame_count,
     (unsigned long)analyzer.unique_node_count,
     (unsigned long)CanopenAnalyzer_GetQueueOverflows(),
     (unsigned long long)logger.stored_frames,
