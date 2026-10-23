@@ -10,6 +10,8 @@
 #include "canopen_decoder.h"
 #include "lwip/api.h"
 #include "lwip/err.h"
+#include "lwip/priv/tcpip_priv.h"
+#include "lwip/tcp.h"
 #include "main.h"
 #include "memory_layout.h"
 #include "network_service.h"
@@ -84,6 +86,12 @@ typedef struct
   size_t length;
 } WebSocketReader;
 
+typedef struct
+{
+  struct tcpip_api_call_data call;
+  struct netconn *connection;
+} TcpNoDelayCall;
+
 static CanFrameRecord *const frame_history =
   (CanFrameRecord *)API_SNAPSHOT_BASE;
 static uint32_t frame_history_write;
@@ -152,6 +160,24 @@ static void StatusAdd64(uint64_t *value, uint64_t amount)
   taskENTER_CRITICAL();
   *value += amount;
   taskEXIT_CRITICAL();
+}
+
+static err_t EnableTcpNoDelayInCore(struct tcpip_api_call_data *call_data)
+{
+  TcpNoDelayCall *request = (TcpNoDelayCall *)call_data;
+  if ((request == NULL) || (request->connection == NULL) ||
+      (request->connection->pcb.tcp == NULL))
+    return ERR_CONN;
+  tcp_nagle_disable(request->connection->pcb.tcp);
+  return ERR_OK;
+}
+
+static bool EnableTcpNoDelay(struct netconn *connection)
+{
+  TcpNoDelayCall request;
+  memset(&request, 0, sizeof(request));
+  request.connection = connection;
+  return tcpip_api_call(EnableTcpNoDelayInCore, &request.call) == ERR_OK;
 }
 
 static uint32_t RotateLeft(uint32_t value, uint32_t bits)
@@ -1186,6 +1212,13 @@ static void BridgeWebSocketRun(struct netconn *connection, uint32_t session_id)
   uint32_t lost_results = 0U;
   uint32_t last_ping = HAL_GetTick();
   int hello_length;
+
+  /* Bridge sends an acknowledgement and, for a fast CANopen device, the SDO
+     result in two consecutive WebSocket messages. With Nagle enabled the
+     result waits for the host's delayed ACK (typically 40-50 ms on Windows),
+     which caps a request/response client at about 20 SDO/s. Change the PCB
+     only through the TCP/IP core so the netconn remains thread-safe. */
+  if (!EnableTcpNoDelay(connection)) return;
 
   CanBridge_GetStatus(&status);
   hello_length = snprintf(hello, sizeof(hello),
