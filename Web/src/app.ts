@@ -12,7 +12,7 @@ interface CanConfig { bitrate_kbps: number; auto_bitrate: boolean; deep_sdo_enab
 interface LogInfo { path: string; session_id: number; size_bytes: number; download_url: string }
 type TxMode = 'silent' | 'active_pending' | 'active';
 type SdoCommand = 'read' | 'write_u8' | 'write_u16' | 'write_u24' | 'write_u32';
-interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean }
+interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean; bridge_active: boolean }
 interface CanTxStatus { queue_depth: number; queue_capacity: number; transmitting: boolean; queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number; last_sequence: number; last_result: string; rate_limit_fps: number; periodic_active: boolean; periodic_sequence: number; periodic_period_ms: number; periodic_attempts: number }
 interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; node_id: number; command: SdoCommand; index: number; subindex: number; value: number; can_id: number; raw: number[]; timeout_ms: number }
 
@@ -52,7 +52,7 @@ let lastRateFrames = 0;
 let lastRateTime = performance.now();
 let liveRate = 0;
 let totalLiveFrames = 0;
-let txMode: CanModeStatus = { mode: 'silent', tx_gate_enabled: false, bitrate_kbps: 0, sync_state: 'searching', safety_reason: 'power_on', queue_depth: 0, transmitting: false };
+let txMode: CanModeStatus = { mode: 'silent', tx_gate_enabled: false, bitrate_kbps: 0, sync_state: 'searching', safety_reason: 'power_on', queue_depth: 0, transmitting: false, bridge_active: false };
 let txStatus: CanTxStatus = { queue_depth: 0, queue_capacity: 16, transmitting: false, queued: 0, sent: 0, cancelled: 0, timeouts: 0, arbitration_lost: 0, bus_off: 0, errors: 0, last_sequence: 0, last_result: 'mode_disabled', rate_limit_fps: 20, periodic_active: false, periodic_sequence: 0, periodic_period_ms: 0, periodic_attempts: 0 };
 let lastSubmittedSequence = 0;
 
@@ -323,20 +323,23 @@ function flushFrames(): void {
 function renderTxControls(): void {
   const periodic = txStatus.periodic_active;
   const busy = txStatus.transmitting || txStatus.queue_depth > 0;
+  const bridge = txMode.bridge_active;
   const modeStatus = $('tx-mode-status');
-  modeStatus.className = `tx-mode-status ${periodic ? 'periodic' : busy ? 'pending' : 'idle'}`;
-  modeStatus.innerHTML = `<span class="dot"></span><strong>${periodic ? `Периодическая · ${formatInt(txStatus.periodic_period_ms)} мс` : busy ? 'Передача…' : 'Готово'}</strong>`;
+  modeStatus.className = `tx-mode-status ${bridge || periodic ? 'periodic' : busy ? 'pending' : 'idle'}`;
+  modeStatus.innerHTML = `<span class="dot"></span><strong>${bridge ? 'Управляется Bridge-клиентом' : periodic ? `Периодическая · ${formatInt(txStatus.periodic_period_ms)} мс` : busy ? 'Передача…' : 'Готово'}</strong>`;
   const badge = $('tx-mode-badge');
-  badge.toggleAttribute('hidden', !periodic);
-  text('tx-mode-badge', periodic ? 'ТАЙМЕР' : '');
-  $('tx-tab-button').classList.toggle('tx-active', periodic);
-  text('tx-mode-detail', periodic
+  badge.toggleAttribute('hidden', !bridge && !periodic);
+  text('tx-mode-badge', bridge ? 'BRIDGE' : periodic ? 'ТАЙМЕР' : '');
+  $('tx-tab-button').classList.toggle('tx-active', bridge || periodic);
+  text('tx-mode-detail', bridge
+    ? 'Локальные и обычные веб-запросы SDO отключены. Мониторинг шины, статистика и журналирование доступны.'
+    : periodic
     ? `${txMode.bitrate_kbps} кбит/с · выполнено ${formatInt(txStatus.periodic_attempts)} · передача остаётся включённой до остановки таймера`
     : `${txMode.bitrate_kbps ? `${txMode.bitrate_kbps} кбит/с · ${txMode.sync_state}` : 'Скорость шины ещё не определена'} · после разового запроса передача выключается автоматически`);
-  $<HTMLButtonElement>('tx-send').disabled = !txMode.bitrate_kbps;
-  $<HTMLButtonElement>('tx-periodic-start').disabled = periodic || !txMode.bitrate_kbps;
-  $<HTMLButtonElement>('tx-periodic-stop').disabled = !periodic;
-  $<HTMLButtonElement>('tx-cancel-last').disabled = !lastSubmittedSequence;
+  $<HTMLButtonElement>('tx-send').disabled = bridge || !txMode.bitrate_kbps;
+  $<HTMLButtonElement>('tx-periodic-start').disabled = bridge || periodic || !txMode.bitrate_kbps;
+  $<HTMLButtonElement>('tx-periodic-stop').disabled = bridge || !periodic;
+  $<HTMLButtonElement>('tx-cancel-last').disabled = bridge || !lastSubmittedSequence;
   $('tx-statistics').innerHTML = [
     ['Очередь', `${txStatus.queue_depth} / ${txStatus.queue_capacity}`, txStatus.transmitting ? 'mailbox занят' : 'ожидание'],
     ['Отправлено', formatInt(txStatus.sent), `принято: ${formatInt(txStatus.queued)}`],

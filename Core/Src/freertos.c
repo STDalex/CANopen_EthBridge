@@ -28,8 +28,10 @@
 /* USER CODE BEGIN Includes */
 #include "app_watchdog.h"
 #include "can_capture.h"
+#include "can_bridge.h"
 #include "can_log.h"
 #include "can_pipeline.h"
+#include "can_scanner.h"
 #include "can_tx_manager.h"
 #include "canopen_analyzer.h"
 #include "api_server.h"
@@ -132,6 +134,7 @@ bool CanPipeline_PublishLocalTx(const CanFrameRecord *frame)
   {
     CanopenAnalyzer_AddQueueOverflow();
   }
+  CanScanner_ProcessFrame(frame);
   ApiServer_SubmitFrame(frame);
   if (xQueueSend(guiFrameQueue, frame, 0U) != pdPASS)
   {
@@ -223,6 +226,8 @@ void MX_FREERTOS_Init(void) {
   CanopenAnalyzer_Init();
   CanLogger_Init();
   CanTxManager_Init();
+  CanBridge_Init();
+  CanScanner_Init();
   NetworkService_Start();
   /* USER CODE END RTOS_QUEUES */
 
@@ -285,6 +290,7 @@ void StartCanRxTask(void const * argument)
     CanLogger_ProducerPoll();
     while (CanCapture_Pop(&frame))
     {
+      CanScanner_ProcessFrame(&frame);
       CanLogger_SubmitFrame(&frame);
       ApiServer_SubmitFrame(&frame);
       if (xQueueSend(analyzerFrameQueue, &frame, 0U) != pdPASS)

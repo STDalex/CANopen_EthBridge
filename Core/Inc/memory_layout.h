@@ -33,5 +33,9 @@
 #define CAN_LOG_DOWNLOAD_BUFFER_BYTES         0x00004000UL
 #define API_HTTP_REQUEST_BUFFER_BASE           0xC0384000UL
 #define API_HTTP_REQUEST_BUFFER_BYTES          0x00004000UL
+#define BRIDGE_TASK_STACK_BASE                  0xC0388000UL
+#define BRIDGE_TASK_STACK_WORDS                 2048U
+#define LWIP_HEAP_BASE                          0xC038A000UL
+#define LWIP_HEAP_BYTES                         0x00010000UL
 
 #endif

@@ -95,6 +95,12 @@ bool CanTx_BuildSdoRequest(const CanTxSdoRequest *request, CanTxFrame *frame);
 bool CanTx_DecodeSdoRequest(const CanTxFrame *frame, CanTxSdoRequest *request);
 CanTxSubmitResult CanTx_SubmitSdo(const CanTxSdoRequest *request,
                                  uint32_t *sequence);
+CanTxSubmitResult CanTx_SubmitBridgeSdo(const CanTxSdoRequest *request,
+                                       uint32_t *sequence);
+bool CanTx_SetBridgeExclusive(bool enabled);
+CanTxSubmitResult CanTx_SubmitScannerSdo(const CanTxSdoRequest *request,
+                                        uint32_t *sequence);
+bool CanTx_SetScannerExclusive(bool enabled);
 CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
                                          uint32_t period_ms,
                                          uint32_t *sequence);

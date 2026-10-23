@@ -64,6 +64,17 @@ def make_session(root: Path, *, close_reason: int = 0,
 
 
 class AnalyzerTests(unittest.TestCase):
+    def test_opens_standalone_web_download(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            session_path = make_session(Path(directory))
+            downloaded = Path(directory) / "S000007_L000001.CSL"
+            downloaded.write_bytes((session_path / "L000001.CSL").read_bytes())
+            sessions = scan_sessions(downloaded)
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0].session_id, 7)
+            self.assertEqual(sessions[0].path, downloaded)
+            self.assertEqual(len(analyze_session(sessions[0]).frames), 3)
+
     def test_table_sort_values_are_typed(self) -> None:
         parse = CanSniffAnalyzer._parse_sort_value
         self.assertEqual(parse("id", "0x607"), 0x607)

@@ -100,6 +100,7 @@ class CanSniffAnalyzer(tk.Tk):
         toolbar.pack(fill=tk.X)
         ttk.Label(toolbar, text="Папка карты / LOGS:").pack(side=tk.LEFT)
         ttk.Entry(toolbar, textvariable=self.path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        ttk.Button(toolbar, text="Открыть CSL…", command=self.browse_file).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(toolbar, text="Обзор…", command=self.browse).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Button(toolbar, text="Обновить", command=self.scan).pack(side=tk.LEFT)
 
@@ -248,6 +249,21 @@ class CanSniffAnalyzer(tk.Tk):
         if not Path(initial).exists():
             initial = str(Path.home())
         selected = filedialog.askdirectory(title="Выберите CANSNIFF или LOGS", initialdir=initial)
+        if selected:
+            self.path_var.set(selected)
+            self.scan()
+
+    def browse_file(self) -> None:
+        initial = Path(self.path_var.get())
+        if initial.is_file():
+            initial = initial.parent
+        elif not initial.exists():
+            initial = Path.home()
+        selected = filedialog.askopenfilename(
+            title="Открыть файл лога CanSniff",
+            initialdir=str(initial),
+            filetypes=(("Логи CanSniff", "*.CSL"), ("Все файлы", "*.*")),
+        )
         if selected:
             self.path_var.set(selected)
             self.scan()
@@ -463,7 +479,8 @@ class CanSniffAnalyzer(tk.Tk):
     def open_session_folder(self) -> None:
         if self.result is None:
             return
-        path = str(self.result.session.path)
+        session_path = self.result.session.path
+        path = str(session_path.parent if session_path.is_file() else session_path)
         try:
             if os.name == "nt":
                 os.startfile(path)  # type: ignore[attr-defined]

@@ -2,7 +2,9 @@
 
 #include "app_version.h"
 #include "app_settings.h"
+#include "can_bridge.h"
 #include "can_log.h"
+#include "can_scanner.h"
 #include "can_tx_manager.h"
 #include "canopen_analyzer.h"
 #include "can_pipeline.h"
@@ -48,12 +50,20 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define UI_EVENT_TABLE_Y       59U
 #define UI_EVENT_TABLE_HEIGHT  (UI_EVENT_VISIBLE_ROWS * UI_EVENT_ROW_HEIGHT)
 
+#define UI_SCANNER_VISIBLE_ROWS 6U
+#define UI_SCANNER_ROW_HEIGHT   24U
+#define UI_SCANNER_TABLE_Y      82U
+#define UI_SCANNER_TABLE_HEIGHT (UI_SCANNER_VISIBLE_ROWS * UI_SCANNER_ROW_HEIGHT)
+
 #define UI_HISTORY_BYTES       (UI_HISTORY_LENGTH * sizeof(CanFrameRecord))
 #define UI_NODE_SNAPSHOT_BYTES (CANOPEN_NODE_COUNT_MAX * sizeof(CanopenNodeSnapshot))
 #define UI_EVENT_SNAPSHOT_BYTES \
   (CANOPEN_EVENT_SNAPSHOT_MAX * sizeof(CanopenNodeEventSnapshot))
+#define UI_SCANNER_SNAPSHOT_BYTES \
+  (CAN_SCANNER_RESULT_MAX * sizeof(CanScannerResult))
 
-_Static_assert((UI_HISTORY_BYTES + UI_NODE_SNAPSHOT_BYTES + UI_EVENT_SNAPSHOT_BYTES) <=
+_Static_assert((UI_HISTORY_BYTES + UI_NODE_SNAPSHOT_BYTES + UI_EVENT_SNAPSHOT_BYTES +
+                UI_SCANNER_SNAPSHOT_BYTES) <=
                UI_SNAPSHOT_REGION_BYTES,
                "UI snapshot buffers exceed their external SDRAM region");
 
@@ -87,6 +97,14 @@ typedef struct
   char subindex[3];
   char data[25];
 } UiEventRowText;
+
+typedef struct
+{
+  char node_id[5];
+  char bitrate[8];
+  char response[20];
+  char hint[30];
+} UiScannerRowText;
 
 typedef enum
 {
@@ -154,6 +172,7 @@ static lv_obj_t *node_events_screen;
 static lv_obj_t *info_screen;
 static lv_obj_t *log_screen;
 static lv_obj_t *tx_screen;
+static lv_obj_t *scanner_screen;
 static lv_obj_t *status_label;
 static lv_obj_t *main_status_label;
 static lv_obj_t *main_storage_label;
@@ -238,6 +257,7 @@ static lv_obj_t *log_counters_label;
 static lv_obj_t *log_selection_label;
 static CanLogMode quick_log_mode = CAN_LOG_MODE_FULL;
 static lv_obj_t *tx_nav_button;
+static lv_obj_t *tx_send_button;
 static lv_obj_t *tx_mode_button;
 static lv_obj_t *tx_mode_label;
 static lv_obj_t *tx_status_label;
@@ -256,6 +276,20 @@ static int32_t tx_field_y;
 static int32_t tx_field_width;
 static int32_t tx_field_height;
 static CanTxSdoCommand tx_command;
+static lv_obj_t *bridge_indicator_label;
+static lv_obj_t *scanner_indicator_label;
+static lv_obj_t *scanner_action_button;
+static lv_obj_t *scanner_action_label;
+static lv_obj_t *scanner_status_label;
+static lv_obj_t *scanner_table_body;
+static lv_obj_t *scanner_spacer;
+static lv_obj_t *scanner_cell_labels[UI_SCANNER_VISIBLE_ROWS][4];
+static UiScannerRowText scanner_row_text[UI_SCANNER_VISIBLE_ROWS];
+static CanScannerResult *const scanner_snapshot =
+  (CanScannerResult *)(UI_SNAPSHOT_BASE + UI_HISTORY_BYTES +
+                       UI_NODE_SNAPSHOT_BYTES + UI_EVENT_SNAPSHOT_BYTES);
+static uint32_t scanner_snapshot_count;
+static bool scanner_programmatic_scroll;
 
 static const char info_monitor_text[] =
   "Монитор: все принятые CAN-кадры с временем, ID, форматом, DLC и данными. "
@@ -284,6 +318,7 @@ static void Render_Rows(void);
 static void Render_NodeRows(void);
 static void Refresh_LogStatus(void);
 static void Tx_RefreshStatus(void);
+static void Refresh_Scanner(void);
 
 static const UiBitrateOption *Find_BitrateOption(uint32_t bitrate_kbps)
 {
@@ -356,6 +391,7 @@ static void Bitrate_SelectorClicked(lv_event_t *event)
   if (lv_obj_is_hidden(bitrate_options_panel))
   {
     lv_obj_set_hidden(bitrate_options_panel, false);
+    lv_obj_move_foreground(bitrate_options_panel);
   }
   else
   {
@@ -368,9 +404,12 @@ static void Bitrate_OptionClicked(lv_event_t *event)
 {
   const UiBitrateOption *option =
     (const UiBitrateOption *)lv_event_get_user_data(event);
+  CanScannerStatus scanner_status;
 
   if (option != NULL)
   {
+    CanScanner_GetStatus(&scanner_status);
+    if (scanner_status.running) CanScanner_Stop();
     lv_label_set_text(bitrate_selector_label, option->selector_text);
     CanControl_RequestBitrate(option->bitrate_kbps);
     (void)AppSettings_UpdateCan(option->bitrate_kbps, deep_sdo_mode, true);
@@ -724,7 +763,19 @@ static void Tx_ModeClicked(lv_event_t *event)
   uint32_t period_ms;
   uint32_t sequence;
   char text[96];
+  CanScannerStatus scanner_status;
   (void)event;
+  CanScanner_GetStatus(&scanner_status);
+  if (scanner_status.running)
+  {
+    lv_label_set_text(tx_status_label, "CAN scanner owns transmission");
+    return;
+  }
+  if (CanBridge_IsActive())
+  {
+    lv_label_set_text(tx_status_label, "Bridge mode: local transmission is disabled");
+    return;
+  }
   CanTx_GetStatus(&status);
   if (status.periodic_active)
   {
@@ -760,7 +811,19 @@ static void Tx_SendClicked(lv_event_t *event)
   CanTxSubmitResult result;
   uint32_t sequence;
   char text[96];
+  CanScannerStatus scanner_status;
   (void)event;
+  CanScanner_GetStatus(&scanner_status);
+  if (scanner_status.running)
+  {
+    lv_label_set_text(tx_status_label, "CAN scanner owns transmission");
+    return;
+  }
+  if (CanBridge_IsActive())
+  {
+    lv_label_set_text(tx_status_label, "Bridge mode: local transmission is disabled");
+    return;
+  }
   if (!Tx_ReadRequest(&request)) return;
   result = CanTx_SubmitSdo(&request, &sequence);
   if (result == CAN_TX_SUBMIT_OK)
@@ -797,15 +860,41 @@ static void Tx_ScreenLoaded(lv_event_t *event)
 static void Tx_RefreshStatus(void)
 {
   CanTxStatus tx;
+  CanScannerStatus scanner_status;
+  bool bridge_active = CanBridge_IsActive();
+  bool scanner_active;
+  CanScanner_GetStatus(&scanner_status);
+  scanner_active = scanner_status.running;
   CanTx_GetStatus(&tx);
   lv_label_set_text(tx_mode_label,
-                    tx.periodic_active ? "STOP PERIODIC SEND" : "START PERIODIC SEND");
+                    scanner_active ? "SCANNER CONTROLLED" :
+                    (bridge_active ? "BRIDGE CONTROLLED" :
+                    (tx.periodic_active ? "STOP PERIODIC SEND" : "START PERIODIC SEND")));
+  if (scanner_active || bridge_active)
+  {
+    lv_obj_add_state(tx_send_button, LV_STATE_DISABLED);
+    lv_obj_add_state(tx_mode_button, LV_STATE_DISABLED);
+    lv_label_set_text(tx_status_label,
+                      scanner_active ? "CAN scanner owns transmission" :
+                      "Bridge mode: SDO requests are accepted only via Ethernet");
+  }
+  else
+  {
+    lv_obj_remove_state(tx_send_button, LV_STATE_DISABLED);
+    lv_obj_remove_state(tx_mode_button, LV_STATE_DISABLED);
+  }
   lv_obj_set_style_bg_color(lv_obj_get_child(tx_mode_button, 0),
-                            lv_color_hex(tx.periodic_active ? 0x6D28D9 : 0x17698C), 0);
+                            lv_color_hex((scanner_active || bridge_active || tx.periodic_active) ?
+                                         0x6D28D9 : 0x17698C), 0);
+  lv_obj_set_style_bg_color(lv_obj_get_child(tx_send_button, 0),
+                            lv_color_hex((scanner_active || bridge_active) ?
+                                         0x3F3F46 : 0x17698C), 0);
   lv_obj_set_style_bg_color(lv_obj_get_child(tx_nav_button, 0),
-                            lv_color_hex(tx.periodic_active ? 0x6D28D9 : 0x17698C), 0);
+                            lv_color_hex((scanner_active || bridge_active || tx.periodic_active) ?
+                                         0x6D28D9 : 0x17698C), 0);
   lv_obj_set_style_text_color(tx_status_label,
-                              lv_color_hex(tx.periodic_active ? 0xC084FC : 0xA9C7D7), 0);
+                              lv_color_hex((scanner_active || bridge_active || tx.periodic_active) ?
+                                           0xC084FC : 0xA9C7D7), 0);
 }
 
 static void Log_ModeSelected(lv_event_t *event)
@@ -1230,6 +1319,149 @@ static void Table_Scrolled(lv_event_t *event)
     programmatic_scroll = false;
     Render_Rows();
   }
+}
+
+static void Clear_ScannerRow(UiScannerRowText *row)
+{
+  row->node_id[0] = '\0';
+  row->bitrate[0] = '\0';
+  row->response[0] = '\0';
+  row->hint[0] = '\0';
+}
+
+static void Format_ScannerRow(UiScannerRowText *row,
+                              const CanScannerResult *result)
+{
+  const char *hint = "";
+  (void)snprintf(row->node_id, sizeof(row->node_id), "%u",
+                 (unsigned int)result->node_id);
+  (void)snprintf(row->bitrate, sizeof(row->bitrate), "%lu",
+                 (unsigned long)result->bitrate_kbps);
+  if (result->kind == CAN_SCANNER_RESPONSE_DEVICE_TYPE)
+  {
+    (void)snprintf(row->response, sizeof(row->response), "0x%08lX",
+                   (unsigned long)result->value);
+    hint = CanScanner_DeviceHint(result->value);
+  }
+  else if (result->kind == CAN_SCANNER_RESPONSE_ABORT)
+  {
+    (void)snprintf(row->response, sizeof(row->response), "AB 0x%08lX",
+                   (unsigned long)result->abort_code);
+  }
+  else
+  {
+    (void)snprintf(row->response, sizeof(row->response),
+                   "CS %02X  %02X%02X%02X%02X",
+                   (unsigned int)result->command,
+                   (unsigned int)result->data[4],
+                   (unsigned int)result->data[5],
+                   (unsigned int)result->data[6],
+                   (unsigned int)result->data[7]);
+  }
+  (void)snprintf(row->hint, sizeof(row->hint), "%s", hint);
+}
+
+static void Render_ScannerRows(void)
+{
+  int32_t scroll_y = lv_obj_get_scroll_y(scanner_table_body);
+  uint32_t first;
+  uint32_t row;
+  if (scroll_y < 0) scroll_y = 0;
+  first = (uint32_t)scroll_y / UI_SCANNER_ROW_HEIGHT;
+  for (row = 0U; row < UI_SCANNER_VISIBLE_ROWS; ++row)
+  {
+    uint32_t index = first + row;
+    uint32_t column;
+    int32_t y = (int32_t)(index * UI_SCANNER_ROW_HEIGHT) + 4;
+    if (index < scanner_snapshot_count)
+      Format_ScannerRow(&scanner_row_text[row], &scanner_snapshot[index]);
+    else
+      Clear_ScannerRow(&scanner_row_text[row]);
+    for (column = 0U; column < 4U; ++column)
+    {
+      lv_obj_set_y(scanner_cell_labels[row][column], y);
+      lv_obj_invalidate(scanner_cell_labels[row][column]);
+    }
+  }
+}
+
+static void Refresh_Scanner(void)
+{
+  CanScannerStatus scanner_status;
+  uint32_t content_height;
+  char text[112];
+  CanScanner_GetStatus(&scanner_status);
+  scanner_snapshot_count = (uint32_t)CanScanner_CopyResults(
+    scanner_snapshot, CAN_SCANNER_RESULT_MAX);
+  content_height = scanner_snapshot_count * UI_SCANNER_ROW_HEIGHT;
+  if (content_height < UI_SCANNER_TABLE_HEIGHT)
+    content_height = UI_SCANNER_TABLE_HEIGHT;
+  lv_obj_set_height(scanner_spacer, (int32_t)content_height);
+  Render_ScannerRows();
+  lv_label_set_text(scanner_action_label, scanner_status.running ? "STOP" : "START");
+  if (scanner_status.running)
+  {
+    (void)snprintf(text, sizeof(text),
+                   "%s: %lu kbit/s, node %u  %lu/%lu  found:%lu",
+                   CanScanner_PhaseName(scanner_status.phase),
+                   (unsigned long)scanner_status.current_bitrate_kbps,
+                   (unsigned int)scanner_status.current_node_id,
+                   (unsigned long)scanner_status.completed_requests,
+                   (unsigned long)scanner_status.total_requests,
+                   (unsigned long)scanner_status.result_count);
+  }
+  else
+  {
+    (void)snprintf(text, sizeof(text), "%s  found:%lu",
+                   CanScanner_PhaseName(scanner_status.phase),
+                   (unsigned long)scanner_status.result_count);
+  }
+  lv_label_set_text(scanner_status_label, text);
+}
+
+static void Scanner_ActionClicked(lv_event_t *event)
+{
+  CanScannerStatus scanner_status;
+  (void)event;
+  CanScanner_GetStatus(&scanner_status);
+  if (scanner_status.running)
+  {
+    CanScanner_Stop();
+  }
+  else if (!CanScanner_Start())
+  {
+    lv_label_set_text(scanner_status_label, "Cannot take exclusive CAN TX control");
+  }
+  scanner_programmatic_scroll = true;
+  lv_obj_scroll_to_y(scanner_table_body, 0, LV_ANIM_OFF);
+  scanner_programmatic_scroll = false;
+  Refresh_Scanner();
+}
+
+static void Scanner_TableScrolled(lv_event_t *event)
+{
+  lv_event_code_t code = lv_event_get_code(event);
+  if (code == LV_EVENT_SCROLL)
+  {
+    Render_ScannerRows();
+  }
+  else if ((code == LV_EVENT_SCROLL_END) && !scanner_programmatic_scroll)
+  {
+    int32_t scroll_y = lv_obj_get_scroll_y(scanner_table_body);
+    if (scroll_y < 0) scroll_y = 0;
+    scroll_y = ((scroll_y + ((int32_t)UI_SCANNER_ROW_HEIGHT / 2)) /
+                (int32_t)UI_SCANNER_ROW_HEIGHT) * (int32_t)UI_SCANNER_ROW_HEIGHT;
+    scanner_programmatic_scroll = true;
+    lv_obj_scroll_to_y(scanner_table_body, scroll_y, LV_ANIM_OFF);
+    scanner_programmatic_scroll = false;
+    Render_ScannerRows();
+  }
+}
+
+static void Scanner_ScreenLoaded(lv_event_t *event)
+{
+  (void)event;
+  Refresh_Scanner();
 }
 
 static int32_t Compare_Nodes(const CanopenNodeSnapshot *left,
@@ -2139,6 +2371,7 @@ void Ui_Init(void)
   info_screen = lv_obj_create(NULL);
   log_screen = lv_obj_create(NULL);
   tx_screen = lv_obj_create(NULL);
+  scanner_screen = lv_obj_create(NULL);
   nodes_return_screen = main_screen;
   Style_Screen(main_screen);
   Style_Screen(monitor_screen);
@@ -2151,21 +2384,50 @@ void Ui_Init(void)
   Style_Screen(info_screen);
   Style_Screen(log_screen);
   Style_Screen(tx_screen);
+  Style_Screen(scanner_screen);
   lv_obj_set_style_text_font(info_screen, &ui_font_cyrillic_14, 0);
+
+  bridge_indicator_label = lv_label_create(lv_layer_top());
+  lv_obj_set_pos(bridge_indicator_label, 52, 5);
+  lv_obj_set_size(bridge_indicator_label, 134, 26);
+  lv_obj_set_style_bg_color(bridge_indicator_label, lv_color_hex(0x6D28D9), 0);
+  lv_obj_set_style_bg_opa(bridge_indicator_label, LV_OPA_COVER, 0);
+  lv_obj_set_style_text_color(bridge_indicator_label, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_align(bridge_indicator_label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_pad_top(bridge_indicator_label, 5, 0);
+  lv_obj_set_style_radius(bridge_indicator_label, 5, 0);
+  lv_label_set_text(bridge_indicator_label, "BRIDGE ACTIVE");
+  lv_obj_set_hidden(bridge_indicator_label, true);
+
+  scanner_indicator_label = lv_label_create(lv_layer_top());
+  lv_obj_set_pos(scanner_indicator_label, 52, 5);
+  lv_obj_set_size(scanner_indicator_label, 134, 26);
+  lv_obj_set_style_bg_color(scanner_indicator_label, lv_color_hex(0xB45309), 0);
+  lv_obj_set_style_bg_opa(scanner_indicator_label, LV_OPA_COVER, 0);
+  lv_obj_set_style_text_color(scanner_indicator_label, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_text_align(scanner_indicator_label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_pad_top(scanner_indicator_label, 5, 0);
+  lv_obj_set_style_radius(scanner_indicator_label, 5, 0);
+  lv_label_set_text(scanner_indicator_label, "SCANNER ACTIVE");
+  lv_obj_set_hidden(scanner_indicator_label, true);
 
   title = Create_Label(main_screen, 0, 14, LCD_WIDTH, "CAN Sniffer", lv_color_hex(0x65C7F7));
   lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
   main_status_label = Create_Label(main_screen, 20, 42, 440, "CAN starting...", lv_color_hex(0xA9C7D7));
   lv_obj_set_style_text_align(main_status_label, LV_TEXT_ALIGN_CENTER, 0);
-  (void)Create_NavigationButton(main_screen, 12, 68, 222, 72,
+  (void)Create_NavigationButton(main_screen, 8, 68, 148, 66,
                                 "CAN Monitor", monitor_screen);
-  (void)Create_NavigationButton(main_screen, 246, 68, 222, 72,
+  (void)Create_NavigationButton(main_screen, 166, 68, 148, 66,
                                 "Nodes", nodes_screen);
-  (void)Create_NavigationButton(main_screen, 12, 148, 222, 72,
+  (void)Create_NavigationButton(main_screen, 324, 68, 148, 66,
+                                "CAN Scanner", scanner_screen);
+  (void)Create_NavigationButton(main_screen, 8, 144, 148, 66,
                                 "microSD Log", log_screen);
-  tx_nav_button = Create_NavigationButton(main_screen, 246, 148, 222, 72,
+  tx_nav_button = Create_NavigationButton(main_screen, 166, 144, 148, 66,
                                            "CANopen SDO", tx_screen);
+  (void)Create_NavigationButton(main_screen, 324, 144, 148, 66,
+                                "Network", network_screen);
   main_storage_label = Create_Label(main_screen, 16, 230, 448,
                                     "SD:No card  Off  LOST:0", lv_color_hex(0xA9C7D7));
   lv_obj_set_style_text_align(main_storage_label, LV_TEXT_ALIGN_CENTER, 0);
@@ -2174,6 +2436,85 @@ void Ui_Init(void)
   main_log_button = Create_QuickLogButton(main_screen, 304, &main_log_button_label);
   (void)Create_NavigationButton(main_screen, 384, 3, 44, 34, "i", info_screen);
   (void)Create_NavigationButton(main_screen, 432, 3, 44, 34, LV_SYMBOL_SETTINGS, settings_screen);
+
+  (void)Create_NavigationButton(scanner_screen, 4, 3, 44, 34,
+                                LV_SYMBOL_HOME, main_screen);
+  title = Create_Label(scanner_screen, 56, 10, 294, "CANopen node scanner",
+                       lv_color_hex(0x65C7F7));
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+  scanner_action_button = Create_NavigationButton(scanner_screen, 364, 3, 112, 34,
+                                                   "START", NULL);
+  scanner_action_label = lv_obj_get_child(scanner_action_button, 1);
+  lv_obj_add_event_cb(scanner_action_button, Scanner_ActionClicked,
+                      LV_EVENT_CLICKED, NULL);
+  scanner_status_label = Create_Label(scanner_screen, 8, 43, 464,
+                                      "ready  found:0", lv_color_hex(0xA9C7D7));
+  lv_label_set_long_mode(scanner_status_label, LV_LABEL_LONG_DOT);
+  lv_obj_set_height(scanner_status_label, 20);
+
+  header_panel = lv_obj_create(scanner_screen);
+  lv_obj_remove_style_all(header_panel);
+  lv_obj_set_pos(header_panel, 0, 61);
+  lv_obj_set_size(header_panel, LCD_WIDTH, 21);
+  lv_obj_set_style_bg_color(header_panel, lv_color_hex(0x17242B), 0);
+  lv_obj_set_style_bg_opa(header_panel, LV_OPA_COVER, 0);
+  lv_obj_set_scrollable(header_panel, false);
+  (void)Create_Label(header_panel, 4, 3, 42, "Node", lv_color_hex(0x65C7F7));
+  (void)Create_Label(header_panel, 50, 3, 62, "kbit/s", lv_color_hex(0x65C7F7));
+  (void)Create_Label(header_panel, 116, 3, 122, "Response 1000:00", lv_color_hex(0x65C7F7));
+  (void)Create_Label(header_panel, 242, 3, 234, "Registered device hint",
+                     lv_color_hex(0x65C7F7));
+
+  scanner_table_body = lv_obj_create(scanner_screen);
+  lv_obj_remove_style_all(scanner_table_body);
+  lv_obj_set_pos(scanner_table_body, 0, UI_SCANNER_TABLE_Y);
+  lv_obj_set_size(scanner_table_body, LCD_WIDTH, UI_SCANNER_TABLE_HEIGHT);
+  lv_obj_set_style_bg_color(scanner_table_body, lv_color_hex(0x101418), 0);
+  lv_obj_set_style_bg_opa(scanner_table_body, LV_OPA_COVER, 0);
+  lv_obj_set_style_pad_all(scanner_table_body, 0, 0);
+  lv_obj_set_scroll_dir(scanner_table_body, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(scanner_table_body, LV_SCROLLBAR_MODE_AUTO);
+  lv_obj_set_style_bg_color(scanner_table_body, lv_color_hex(0x65C7F7),
+                            LV_PART_SCROLLBAR);
+  lv_obj_set_style_bg_opa(scanner_table_body, LV_OPA_70, LV_PART_SCROLLBAR);
+  lv_obj_set_style_width(scanner_table_body, 4, LV_PART_SCROLLBAR);
+  lv_obj_add_event_cb(scanner_table_body, Scanner_TableScrolled, LV_EVENT_ALL, NULL);
+  scanner_spacer = lv_obj_create(scanner_table_body);
+  lv_obj_remove_style_all(scanner_spacer);
+  lv_obj_set_pos(scanner_spacer, 0, 0);
+  lv_obj_set_size(scanner_spacer, 1, UI_SCANNER_TABLE_HEIGHT);
+  lv_obj_set_clickable(scanner_spacer, false);
+  lv_obj_set_scrollable(scanner_spacer, false);
+  for (row = 0U; row < UI_SCANNER_VISIBLE_ROWS; ++row)
+  {
+    int32_t y = (int32_t)(row * UI_SCANNER_ROW_HEIGHT) + 4;
+    Clear_ScannerRow(&scanner_row_text[row]);
+    scanner_cell_labels[row][0] = Create_Label(scanner_table_body, 4, y, 42, "",
+                                                lv_color_hex(0xE8EEF2));
+    scanner_cell_labels[row][1] = Create_Label(scanner_table_body, 50, y, 62, "",
+                                                lv_color_hex(0xA9C7D7));
+    scanner_cell_labels[row][2] = Create_Label(scanner_table_body, 116, y, 122, "",
+                                                lv_color_hex(0xE8EEF2));
+    scanner_cell_labels[row][3] = Create_Label(scanner_table_body, 242, y, 234, "",
+                                                lv_color_hex(0x65C7F7));
+    lv_label_set_text_static(scanner_cell_labels[row][0], scanner_row_text[row].node_id);
+    lv_label_set_text_static(scanner_cell_labels[row][1], scanner_row_text[row].bitrate);
+    lv_label_set_text_static(scanner_cell_labels[row][2], scanner_row_text[row].response);
+    lv_label_set_text_static(scanner_cell_labels[row][3], scanner_row_text[row].hint);
+  }
+  Create_GridLine(scanner_screen, 0, 60, LCD_WIDTH, 1);
+  Create_GridLine(scanner_screen, 0, 81, LCD_WIDTH, 1);
+  Create_GridLine(scanner_screen, 47, 61, 1, 165);
+  Create_GridLine(scanner_screen, 113, 61, 1, 165);
+  Create_GridLine(scanner_screen, 239, 61, 1, 165);
+  for (line = 1U; line < UI_SCANNER_VISIBLE_ROWS; ++line)
+  {
+    Create_GridLine(scanner_screen, 0,
+                    UI_SCANNER_TABLE_Y + (int32_t)(line * UI_SCANNER_ROW_HEIGHT),
+                    LCD_WIDTH, 1);
+  }
+  lv_obj_add_event_cb(scanner_screen, Scanner_ScreenLoaded,
+                      LV_EVENT_SCREEN_LOADED, NULL);
 
   (void)Create_NavigationButton(tx_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
   title = Create_Label(tx_screen, 56, 10, 416, "CANopen SDO client",
@@ -2228,8 +2569,8 @@ void Ui_Init(void)
   lv_textarea_set_text(tx_value_textarea, "0");
   lv_obj_add_event_cb(tx_value_textarea, Tx_FieldClicked, LV_EVENT_CLICKED, NULL);
 
-  button = Create_NavigationButton(tx_screen, 8, 135, 464, 42, "SEND", NULL);
-  lv_obj_add_event_cb(button, Tx_SendClicked, LV_EVENT_CLICKED, NULL);
+  tx_send_button = Create_NavigationButton(tx_screen, 8, 135, 464, 42, "SEND", NULL);
+  lv_obj_add_event_cb(tx_send_button, Tx_SendClicked, LV_EVENT_CLICKED, NULL);
 
   (void)Create_Label(tx_screen, 8, 198, 50, "Period", lv_color_hex(0xA9C7D7));
   tx_period_textarea = lv_textarea_create(tx_screen);
@@ -2790,6 +3131,8 @@ void Ui_Init(void)
   events_programmatic_scroll = false;
   node_events_paused = false;
   node_object_mode = false;
+  scanner_snapshot_count = 0U;
+  scanner_programmatic_scroll = false;
   rows_dirty = false;
   Refresh_LogStatus();
   lv_screen_load(main_screen);
@@ -2819,6 +3162,8 @@ void Ui_TaskLoop(void)
   CanTxStatus tx;
   uint32_t now = HAL_GetTick();
 
+  CanScanner_Update();
+
   if (rows_dirty)
   {
     uint32_t content_height = history_count * UI_ROW_HEIGHT;
@@ -2837,12 +3182,23 @@ void Ui_TaskLoop(void)
     char main_text[112];
     const char *state;
     const char *operating;
+    bool bridge_active;
+    CanScannerStatus scanner_status;
     uint32_t drops;
     CanControl_GetStatus(&status);
     CanTx_GetStatus(&tx);
+    CanScanner_GetStatus(&scanner_status);
+    bridge_active = CanBridge_IsActive();
     state = (status.state == CAN_SYNC_LOCKED) ? "LOCK" :
             ((status.state == CAN_SYNC_MANUAL) ? "MAN" : "SCAN");
-    operating = tx.periodic_active ? "SDO TIMER/" : "";
+    operating = scanner_status.running ? "SCANNER/" :
+                (bridge_active ? "BRIDGE/" :
+                (tx.periodic_active ? "SDO TIMER/" : ""));
+    lv_obj_set_hidden(bridge_indicator_label,
+                      !bridge_active || (lv_screen_active() != main_screen));
+    lv_obj_set_hidden(scanner_indicator_label,
+                      !scanner_status.running ||
+                      (lv_screen_active() == scanner_screen));
     drops = status.ring_overflows + status.gui_overflows +
             CanopenAnalyzer_GetQueueOverflows();
     (void)snprintf(text, sizeof(text), "CAN %s%s%s %luk RX:%lu D:%lu E:%lu",
@@ -2861,9 +3217,11 @@ void Ui_TaskLoop(void)
     lv_label_set_text(status_label, text);
     lv_label_set_text(main_status_label, main_text);
     lv_obj_set_style_text_color(status_label,
-      lv_color_hex(tx.periodic_active ? 0xC084FC : 0xE8EEF2), 0);
+      lv_color_hex((scanner_status.running || bridge_active || tx.periodic_active) ?
+                   0xC084FC : 0xE8EEF2), 0);
     lv_obj_set_style_text_color(main_status_label,
-      lv_color_hex(tx.periodic_active ? 0xC084FC : 0xA9C7D7), 0);
+      lv_color_hex((scanner_status.running || bridge_active || tx.periodic_active) ?
+                   0xC084FC : 0xA9C7D7), 0);
     Refresh_LogStatus();
     Tx_RefreshStatus();
     last_status_update = now;
@@ -2886,6 +3244,10 @@ void Ui_TaskLoop(void)
       {
         Refresh_NodeEventsSnapshot();
       }
+    }
+    else if (active_screen == scanner_screen)
+    {
+      Refresh_Scanner();
     }
     last_analyzer_update = now;
   }

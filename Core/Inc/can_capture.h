@@ -7,6 +7,9 @@
 #define CAN_FRAME_FLAG_EXTENDED  (1U << 0)
 #define CAN_FRAME_FLAG_REMOTE    (1U << 1)
 #define CAN_FRAME_FLAG_LOCAL_TX  (1U << 2)
+#define CAN_FRAME_FLAG_BRIDGE_REQUEST     (1U << 3)
+#define CAN_FRAME_FLAG_BRIDGE_RESPONSE    (1U << 4)
+#define CAN_FRAME_FLAG_BRIDGE_UNSOLICITED (1U << 5)
 
 typedef struct
 {

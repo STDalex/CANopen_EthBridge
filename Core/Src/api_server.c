@@ -2,6 +2,7 @@
 
 #include "app_settings.h"
 #include "app_version.h"
+#include "can_bridge.h"
 #include "can_log.h"
 #include "can_pipeline.h"
 #include "can_tx_manager.h"
@@ -35,6 +36,9 @@
 #define WEBSOCKET_TX_MAX_BYTES       (4U + WEBSOCKET_PAYLOAD_MAX_BYTES)
 #define WEBSOCKET_MAGIC              0x53575343UL /* "CSWS", little-endian. */
 #define WEBSOCKET_PROTOCOL_VERSION   1U
+#define BRIDGE_WS_RX_BYTES           768U
+#define BRIDGE_WS_TEXT_BYTES         512U
+#define BRIDGE_PING_INTERVAL_MS      2000U
 #define API_SNAPSHOT_BYTES \
   ((2U * API_FRAME_SNAPSHOT_MAX * sizeof(CanFrameRecord)) + \
    (CANOPEN_NODE_COUNT_MAX * sizeof(CanopenNodeSnapshot)) + \
@@ -74,6 +78,12 @@ typedef struct
   uint32_t block_bytes;
 } Sha1Context;
 
+typedef struct
+{
+  uint8_t data[BRIDGE_WS_RX_BYTES];
+  size_t length;
+} WebSocketReader;
+
 static CanFrameRecord *const frame_history =
   (CanFrameRecord *)API_SNAPSHOT_BASE;
 static uint32_t frame_history_write;
@@ -104,9 +114,24 @@ static StackType_t *const websocket_task_stack =
 static TaskHandle_t websocket_task_handle;
 static struct netconn *volatile websocket_pending_connection;
 static volatile bool websocket_reserved;
+static StaticTask_t bridge_task_control;
+static StackType_t *const bridge_task_stack =
+  (StackType_t *)BRIDGE_TASK_STACK_BASE;
+static TaskHandle_t bridge_task_handle;
+static struct netconn *volatile bridge_pending_connection;
+static volatile bool bridge_websocket_reserved;
+static volatile uint32_t bridge_pending_session_id;
+static uint32_t bridge_stream_sequence;
 static ApiServerStatus public_status;
 static CanLogMode logger_configured_mode = CAN_LOG_MODE_FULL;
 static CanTxHistoryEntry tx_history_snapshot[CAN_TX_HISTORY_CAPACITY];
+
+static uint32_t QueryUnsigned(const char *query, const char *name,
+                              uint32_t default_value, uint32_t maximum);
+static bool JsonReadUnsigned(const char *json, const char *key,
+                             uint32_t *value);
+static bool JsonReadString(const char *json, const char *key,
+                           char *value, size_t capacity);
 
 static void StatusIncrement(uint32_t *value)
 {
@@ -599,7 +624,11 @@ static bool WebSocketSendFrame(struct netconn *connection, uint8_t opcode,
                                const uint8_t *payload, size_t payload_length)
 {
   uint8_t header[4];
+  struct netvector vectors[2];
   size_t header_length;
+  size_t written = 0U;
+  size_t total_length;
+  err_t error;
   header[0] = (uint8_t)(0x80U | opcode);
   if (payload_length <= 125U)
   {
@@ -617,8 +646,20 @@ static bool WebSocketSendFrame(struct netconn *connection, uint8_t opcode,
   {
     return false;
   }
-  return WriteRaw(connection, header, header_length) &&
-         ((payload_length == 0U) || WriteRaw(connection, payload, payload_length));
+
+  /* Submit the WebSocket header and payload in one lwIP API operation. Two
+     separate netconn_write() calls let the tiny header leave as its own TCP
+     segment; Nagle then holds the payload until the peer's delayed ACK (about
+     40-50 ms on Windows), effectively limiting Bridge SDO traffic to 20/s. */
+  vectors[0].ptr = header;
+  vectors[0].len = header_length;
+  vectors[1].ptr = payload;
+  vectors[1].len = payload_length;
+  total_length = header_length + payload_length;
+  error = netconn_write_vectors_partly(connection, vectors,
+                                        payload_length == 0U ? 1U : 2U,
+                                        NETCONN_COPY, &written);
+  return (error == ERR_OK) && (written == total_length);
 }
 
 static bool WebSocketReadControl(struct netconn *connection)
@@ -677,6 +718,81 @@ static bool WebSocketReadControl(struct netconn *connection)
     return WebSocketSendFrame(connection, 0x0AU, payload, payload_length);
   }
   return true;
+}
+
+/* Returns 1 for a complete frame, 0 when more TCP data is needed, and -1 on
+   disconnect or malformed input. Client-to-server frames must be masked. */
+static int WebSocketReadFrame(struct netconn *connection,
+                              WebSocketReader *reader,
+                              uint8_t *opcode,
+                              uint8_t *payload,
+                              size_t payload_capacity,
+                              size_t *payload_length)
+{
+  size_t header_length;
+  size_t frame_length;
+  size_t length;
+  uint8_t mask[4];
+  size_t index;
+
+  for (;;)
+  {
+    if (reader->length >= 2U)
+    {
+      uint8_t length_code = reader->data[1] & 0x7FU;
+      if (((reader->data[0] & 0x80U) == 0U) ||
+          ((reader->data[1] & 0x80U) == 0U)) return -1;
+      if (length_code <= 125U)
+      {
+        length = length_code;
+        header_length = 6U;
+      }
+      else if (length_code == 126U)
+      {
+        if (reader->length < 4U) goto receive_more;
+        length = ((size_t)reader->data[2] << 8U) | reader->data[3];
+        header_length = 8U;
+      }
+      else return -1;
+      if (length > payload_capacity) return -1;
+      frame_length = header_length + length;
+      if (reader->length >= frame_length)
+      {
+        memcpy(mask, reader->data + header_length - 4U, sizeof(mask));
+        for (index = 0U; index < length; ++index)
+          payload[index] = reader->data[header_length + index] ^ mask[index & 3U];
+        *opcode = reader->data[0] & 0x0FU;
+        *payload_length = length;
+        reader->length -= frame_length;
+        if (reader->length != 0U)
+          memmove(reader->data, reader->data + frame_length, reader->length);
+        return 1;
+      }
+    }
+
+receive_more:
+    {
+      struct netbuf *buffer = NULL;
+      err_t error = netconn_recv(connection, &buffer);
+      uint16_t received;
+      if (error == ERR_TIMEOUT) return 0;
+      if ((error != ERR_OK) || (buffer == NULL))
+      {
+        if (buffer != NULL) netbuf_delete(buffer);
+        return -1;
+      }
+      received = netbuf_len(buffer);
+      if ((received == 0U) ||
+          ((reader->length + received) > sizeof(reader->data)))
+      {
+        netbuf_delete(buffer);
+        return -1;
+      }
+      (void)netbuf_copy(buffer, reader->data + reader->length, received);
+      reader->length += received;
+      netbuf_delete(buffer);
+    }
+  }
 }
 
 static uint32_t WebSocketCopyBatch(uint32_t *sequence, uint32_t *lost,
@@ -835,8 +951,7 @@ static void WebSocketTask(void *argument)
   }
 }
 
-static bool HandleWebSocketUpgrade(struct netconn *connection,
-                                   const char *request)
+static bool WebSocketAccept(struct netconn *connection, const char *request)
 {
   static const char websocket_guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
   char upgrade[32];
@@ -850,7 +965,6 @@ static bool HandleWebSocketUpgrade(struct netconn *connection,
   Sha1Context sha1;
   int source_length;
   int response_length;
-  bool available;
 
   if (!FindHeaderValue(request, "Upgrade", upgrade, sizeof(upgrade)) ||
       !HeaderHasToken(upgrade, "websocket") ||
@@ -868,28 +982,9 @@ static bool HandleWebSocketUpgrade(struct netconn *connection,
     return false;
   }
 
-  taskENTER_CRITICAL();
-  available = !websocket_reserved;
-  if (available)
-  {
-    websocket_reserved = true;
-    public_status.websocket_active = true;
-  }
-  taskEXIT_CRITICAL();
-  if (!available)
-  {
-    SendError(connection, "503 Service Unavailable", "websocket_busy",
-              "The live stream already has a client");
-    return false;
-  }
-
   source_length = snprintf(source, sizeof(source), "%s%s", key, websocket_guid);
   if ((source_length <= 0) || ((size_t)source_length >= sizeof(source)))
   {
-    taskENTER_CRITICAL();
-    websocket_reserved = false;
-    public_status.websocket_active = false;
-    taskEXIT_CRITICAL();
     SendError(connection, "400 Bad Request", "bad_websocket_key",
               "Sec-WebSocket-Key is too long");
     return false;
@@ -906,11 +1001,38 @@ static bool HandleWebSocketUpgrade(struct netconn *connection,
   if ((response_length <= 0) || ((size_t)response_length >= sizeof(response)) ||
       !WriteRaw(connection, response, (size_t)response_length))
   {
+    StatusIncrement(&public_status.send_errors);
+    return false;
+  }
+
+  return true;
+}
+
+static bool HandleWebSocketUpgrade(struct netconn *connection,
+                                   const char *request)
+{
+  bool available;
+
+  taskENTER_CRITICAL();
+  available = !websocket_reserved;
+  if (available)
+  {
+    websocket_reserved = true;
+    public_status.websocket_active = true;
+  }
+  taskEXIT_CRITICAL();
+  if (!available)
+  {
+    SendError(connection, "503 Service Unavailable", "websocket_busy",
+              "The live stream already has a client");
+    return false;
+  }
+  if (!WebSocketAccept(connection, request))
+  {
     taskENTER_CRITICAL();
     websocket_reserved = false;
     public_status.websocket_active = false;
     taskEXIT_CRITICAL();
-    StatusIncrement(&public_status.send_errors);
     return false;
   }
 
@@ -919,6 +1041,315 @@ static bool HandleWebSocketUpgrade(struct netconn *connection,
   ++public_status.websocket_connections;
   taskEXIT_CRITICAL();
   xTaskNotifyGive(websocket_task_handle);
+  return true;
+}
+
+static const char *BridgeSubmitName(CanBridgeSubmitResult result)
+{
+  switch (result)
+  {
+    case CAN_BRIDGE_SUBMIT_OK: return "accepted";
+    case CAN_BRIDGE_SUBMIT_DUPLICATE: return "duplicate";
+    case CAN_BRIDGE_SUBMIT_DISABLED: return "bridge_disabled";
+    case CAN_BRIDGE_SUBMIT_NOT_CONNECTED: return "not_connected";
+    case CAN_BRIDGE_SUBMIT_BUSY: return "request_pending";
+    case CAN_BRIDGE_SUBMIT_INVALID: return "invalid_request";
+    default: return "can_not_ready";
+  }
+}
+
+static bool BridgeSendText(struct netconn *connection, const char *text)
+{
+  return WebSocketSendFrame(connection, 0x01U, (const uint8_t *)text,
+                            strlen(text));
+}
+
+static bool BridgeSendResult(struct netconn *connection,
+                             const CanBridgeResult *result)
+{
+  char text[384];
+  char raw[17];
+  uint32_t index;
+  int length;
+  for (index = 0U; index < 8U; ++index)
+    (void)snprintf(raw + (index * 2U), 3U, "%02X",
+                   (unsigned int)result->response.data[index]);
+  raw[16] = '\0';
+  length = snprintf(text, sizeof(text),
+    "{\"type\":\"result\",\"request_id\":%lu,\"tx_sequence\":%lu,"
+    "\"status\":\"%s\",\"timestamp_us\":%lu,\"capture_time_us\":%llu,"
+    "\"abort_code\":%lu,"
+    "\"has_response\":%s,\"can_id\":%lu,\"dlc\":%u,\"data\":\"%s\"}",
+    (unsigned long)result->client_request_id,
+    (unsigned long)result->tx_sequence,
+    CanBridge_ResultName(result->code),
+    (unsigned long)result->timestamp_us,
+    (unsigned long long)result->capture_time_us,
+    (unsigned long)result->abort_code,
+    result->has_response ? "true" : "false",
+    (unsigned long)result->response.id,
+    (unsigned int)result->response.dlc, raw);
+  return (length > 0) && ((size_t)length < sizeof(text)) &&
+         WebSocketSendFrame(connection, 0x01U, (const uint8_t *)text,
+                            (size_t)length);
+}
+
+static bool BridgeParseSdo(const char *json, uint32_t *request_id,
+                           CanTxSdoRequest *request)
+{
+  uint32_t value;
+  char command[16];
+  CanTxFrame validation_frame;
+  memset(request, 0, sizeof(*request));
+  request->timeout_ms = CAN_TX_DEFAULT_TIMEOUT_MS;
+  if (!JsonReadUnsigned(json, "request_id", request_id) ||
+      (*request_id == 0U) ||
+      !JsonReadUnsigned(json, "node_id", &value) ||
+      (value < 1U) || (value > 127U)) return false;
+  request->node_id = (uint8_t)value;
+  if (!JsonReadUnsigned(json, "index", &value) || (value > 0xFFFFU))
+    return false;
+  request->index = (uint16_t)value;
+  if (!JsonReadUnsigned(json, "subindex", &value) || (value > 0xFFU))
+    return false;
+  request->subindex = (uint8_t)value;
+  if (!JsonReadString(json, "command", command, sizeof(command))) return false;
+  if (strcmp(command, "read") == 0) request->command = CAN_TX_SDO_READ;
+  else if (strcmp(command, "write_u8") == 0) request->command = CAN_TX_SDO_WRITE_U8;
+  else if (strcmp(command, "write_u16") == 0) request->command = CAN_TX_SDO_WRITE_U16;
+  else if (strcmp(command, "write_u24") == 0) request->command = CAN_TX_SDO_WRITE_U24;
+  else if (strcmp(command, "write_u32") == 0) request->command = CAN_TX_SDO_WRITE_U32;
+  else return false;
+  if ((request->command != CAN_TX_SDO_READ) &&
+      !JsonReadUnsigned(json, "value", &request->value)) return false;
+  if (JsonReadUnsigned(json, "timeout_ms", &value))
+  {
+    if ((value < 10U) || (value > 1000U)) return false;
+    request->timeout_ms = (uint16_t)value;
+  }
+  return CanTx_BuildSdoRequest(request, &validation_frame);
+}
+
+static bool BridgeHandleText(struct netconn *connection, uint32_t session_id,
+                             char *json)
+{
+  char type[16];
+  char response[192];
+  CanTxSdoRequest request;
+  CanBridgeSubmitResult result;
+  CanBridgeResult retained;
+  uint32_t request_id;
+  uint32_t sequence = 0U;
+  int length;
+
+  if (!JsonReadString(json, "type", type, sizeof(type)))
+    return BridgeSendText(connection,
+      "{\"type\":\"error\",\"error\":\"message_type_required\"}");
+  if (strcmp(type, "ping") == 0)
+  {
+    CanBridge_Heartbeat(session_id);
+    return BridgeSendText(connection, "{\"type\":\"pong\"}");
+  }
+  if ((strcmp(type, "sdo") != 0) ||
+      !BridgeParseSdo(json, &request_id, &request))
+    return BridgeSendText(connection,
+      "{\"type\":\"error\",\"error\":\"invalid_sdo_request\"}");
+
+  CanBridge_Heartbeat(session_id);
+  result = CanBridge_SubmitSdo(session_id, request_id, &request, &sequence);
+  length = snprintf(response, sizeof(response),
+    "{\"type\":\"ack\",\"request_id\":%lu,\"tx_sequence\":%lu,"
+    "\"status\":\"%s\"}", (unsigned long)request_id,
+    (unsigned long)sequence, BridgeSubmitName(result));
+  if ((length <= 0) || ((size_t)length >= sizeof(response)) ||
+      !WebSocketSendFrame(connection, 0x01U, (const uint8_t *)response,
+                          (size_t)length)) return false;
+  if (result == CAN_BRIDGE_SUBMIT_DUPLICATE)
+  {
+    if (CanBridge_FindResult(request_id, &retained))
+      return BridgeSendResult(connection, &retained);
+  }
+  return true;
+}
+
+static void BridgeWebSocketRun(struct netconn *connection, uint32_t session_id)
+{
+  CanFrameRecord frames[WEBSOCKET_BATCH_MAX_FRAMES];
+  uint8_t transmit[WEBSOCKET_TX_MAX_BYTES];
+  uint8_t incoming[BRIDGE_WS_TEXT_BYTES + 1U];
+  WebSocketReader reader = {{0}, 0U};
+  CanBridgeResult result;
+  CanBridgeStatus status;
+  char hello[192];
+  uint32_t sent_generation = 0U;
+  uint32_t lost = 0U;
+  uint32_t lost_results = 0U;
+  uint32_t last_ping = HAL_GetTick();
+  int hello_length;
+
+  CanBridge_GetStatus(&status);
+  hello_length = snprintf(hello, sizeof(hello),
+    "{\"type\":\"hello\",\"protocol\":1,\"mode\":\"bridge\","
+    "\"session_id\":%lu,\"lease_ms\":%u,\"sequence\":%lu}",
+    (unsigned long)session_id, (unsigned int)CAN_BRIDGE_LEASE_MS,
+    (unsigned long)bridge_stream_sequence);
+  if ((hello_length <= 0) || ((size_t)hello_length >= sizeof(hello)) ||
+      !WebSocketSendFrame(connection, 0x01U, (const uint8_t *)hello,
+                          (size_t)hello_length)) return;
+
+  netconn_set_recvtimeout(connection, 1);
+  netconn_set_sendtimeout(connection, 1000);
+  for (;;)
+  {
+    uint8_t opcode;
+    size_t incoming_length;
+    int received;
+    uint32_t count;
+    size_t payload_length;
+
+    CanBridge_Update();
+    CanBridge_GetStatus(&status);
+    if (!status.active || !status.connected ||
+        (status.session_id != session_id)) break;
+
+    uint32_t delivered;
+    for (delivered = 0U; delivered < 8U; ++delivered)
+    {
+      if (!CanBridge_GetNextResult(sent_generation, &result, &lost_results))
+        break;
+      if (!BridgeSendResult(connection, &result)) return;
+      sent_generation = result.generation;
+    }
+
+    received = WebSocketReadFrame(connection, &reader, &opcode, incoming,
+                                  BRIDGE_WS_TEXT_BYTES, &incoming_length);
+    if (received < 0) break;
+    if (received > 0)
+    {
+      if (opcode == 0x08U)
+      {
+        (void)WebSocketSendFrame(connection, 0x08U, incoming, incoming_length);
+        break;
+      }
+      if (opcode == 0x09U)
+      {
+        CanBridge_Heartbeat(session_id);
+        if (!WebSocketSendFrame(connection, 0x0AU, incoming, incoming_length)) break;
+      }
+      else if (opcode == 0x0AU)
+      {
+        CanBridge_Heartbeat(session_id);
+      }
+      else if (opcode == 0x01U)
+      {
+        incoming[incoming_length] = '\0';
+        if (!BridgeHandleText(connection, session_id, (char *)incoming)) break;
+      }
+      else if (opcode != 0x02U)
+      {
+        break;
+      }
+    }
+
+    count = WebSocketCopyBatch(&bridge_stream_sequence, &lost, frames);
+    if (count != 0U)
+    {
+      payload_length = WebSocketBuildBatch(transmit + 4U, frames, count,
+                                            bridge_stream_sequence, lost);
+      transmit[0] = 0x82U;
+      if (payload_length <= 125U)
+      {
+        memmove(transmit + 2U, transmit + 4U, payload_length);
+        transmit[1] = (uint8_t)payload_length;
+        payload_length += 2U;
+      }
+      else
+      {
+        transmit[1] = 126U;
+        transmit[2] = (uint8_t)(payload_length >> 8U);
+        transmit[3] = (uint8_t)payload_length;
+        payload_length += 4U;
+      }
+      if (!WriteRaw(connection, transmit, payload_length)) break;
+      bridge_stream_sequence += count;
+      lost = 0U;
+    }
+    if ((uint32_t)(HAL_GetTick() - last_ping) >= BRIDGE_PING_INTERVAL_MS)
+    {
+      uint32_t now = HAL_GetTick();
+      uint8_t ping[4];
+      StoreLe32(ping, now);
+      if (!WebSocketSendFrame(connection, 0x09U, ping, sizeof(ping))) break;
+      last_ping = now;
+    }
+
+    /* A short cooperative delay avoids coupling the Bridge connection to the
+       listener's netconn event callback. Each connection remains owned by one
+       task, while SDO replies are still forwarded without the former 50 ms
+       inter-packet delay. */
+    if ((delivered < 8U) && (count < WEBSOCKET_BATCH_MAX_FRAMES))
+      vTaskDelay(pdMS_TO_TICKS(1U));
+  }
+}
+
+static void BridgeWebSocketTask(void *argument)
+{
+  (void)argument;
+  for (;;)
+  {
+    struct netconn *connection;
+    uint32_t session_id = 0U;
+    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    taskENTER_CRITICAL();
+    connection = bridge_pending_connection;
+    session_id = bridge_pending_session_id;
+    bridge_pending_connection = NULL;
+    taskEXIT_CRITICAL();
+    if (connection != NULL)
+    {
+      BridgeWebSocketRun(connection, session_id);
+      (void)netconn_close(connection);
+      netconn_delete(connection);
+      CanBridge_Detach(session_id);
+    }
+    taskENTER_CRITICAL();
+    bridge_websocket_reserved = false;
+    taskEXIT_CRITICAL();
+  }
+}
+
+static bool HandleBridgeWebSocketUpgrade(struct netconn *connection,
+                                         const char *request,
+                                         const char *query)
+{
+  uint32_t session_id = QueryUnsigned(query, "session_id", 0U, 0xFFFFFFFFUL);
+  bool available;
+  taskENTER_CRITICAL();
+  available = !bridge_websocket_reserved;
+  if (available) bridge_websocket_reserved = true;
+  taskEXIT_CRITICAL();
+  if (!available || !CanBridge_Attach(session_id))
+  {
+    taskENTER_CRITICAL();
+    if (available) bridge_websocket_reserved = false;
+    taskEXIT_CRITICAL();
+    SendError(connection, "409 Conflict", "bridge_unavailable",
+              "Bridge session is invalid, disabled, or already connected");
+    return false;
+  }
+  if (!WebSocketAccept(connection, request))
+  {
+    CanBridge_Detach(session_id);
+    taskENTER_CRITICAL();
+    bridge_websocket_reserved = false;
+    taskEXIT_CRITICAL();
+    return false;
+  }
+  taskENTER_CRITICAL();
+  bridge_pending_connection = connection;
+  bridge_pending_session_id = session_id;
+  taskEXIT_CRITICAL();
+  xTaskNotifyGive(bridge_task_handle);
   return true;
 }
 
@@ -1192,6 +1623,8 @@ static void HandleRoot(struct netconn *connection)
     "\"/api/v1/config/logger\","
     "\"/api/v1/can/mode\",\"/api/v1/can/tx\","
     "\"/api/v1/can/tx/history\",\"/api/v1/can/tx/periodic\","
+    "\"/api/v1/bridge/enable\",\"/api/v1/bridge/disable\","
+    "\"/api/v1/bridge/status\",\"/api/v1/bridge\","
     "\"/api/v1/logger/start\",\"/api/v1/logger/stop\","
     "\"/api/v1/nodes\",\"/api/v1/statistics\","
     "\"/api/v1/statistics/reset\","
@@ -1205,6 +1638,8 @@ static void HandleRoot(struct netconn *connection)
            "\"/api/v1/config/logger\","
            "\"/api/v1/can/mode\",\"/api/v1/can/tx\","
            "\"/api/v1/can/tx/history\",\"/api/v1/can/tx/periodic\","
+           "\"/api/v1/bridge/enable\",\"/api/v1/bridge/disable\","
+           "\"/api/v1/bridge/status\",\"/api/v1/bridge\","
            "\"/api/v1/logger/start\",\"/api/v1/logger/stop\","
            "\"/api/v1/nodes\",\"/api/v1/statistics\","
            "\"/api/v1/statistics/reset\","
@@ -1245,13 +1680,14 @@ static void HandleState(struct netconn *connection)
   WriterPrintf(&writer,
                "},\"can\":{\"state\":\"%s\",\"bitrate_kbps\":%lu,\"received\":%lu,"
                "\"operating_mode\":\"%s\",\"tx_gate_enabled\":%s,"
-               "\"safety_reason\":\"%s\"},"
+               "\"safety_reason\":\"%s\",\"bridge_active\":%s},"
                "\"storage\":{\"state\":\"%s\",\"mode\":\"%s\",\"file\":\"%s\"}}\n",
                SyncStateName(capture.state), (unsigned long)capture.bitrate_kbps,
                (unsigned long)capture.received,
                CanControl_OperatingModeName(capture.operating_mode),
                capture.tx_gate_enabled ? "true" : "false",
                CanControl_SafetyReasonName(capture.safety_reason),
+               CanBridge_IsActive() ? "true" : "false",
                CanLogger_CardStateName(logger.card_state),
                CanLogger_ModeName(logger.mode), logger.file_name);
   WriterEnd(&writer);
@@ -1350,6 +1786,13 @@ static void HandleCanPut(struct netconn *connection, const char *body)
   DeviceSettings settings;
   uint32_t bitrate;
 
+  if (CanBridge_IsActive())
+  {
+    SendError(connection, "409 Conflict", "bridge_active",
+              "CAN settings cannot change while bridge mode is active");
+    return;
+  }
+
   AppSettings_Get(&settings);
   if (JsonReadUnsigned(body, "bitrate_kbps", &bitrate))
   {
@@ -1372,6 +1815,66 @@ static void HandleCanPut(struct netconn *connection, const char *body)
   WriteCanConfig(connection, "202 Accepted");
 }
 
+static void WriteBridgeStatus(struct netconn *connection, const char *http_status)
+{
+  JsonWriter writer;
+  CanBridgeStatus status;
+  CanBridgeResult result;
+  CanBridge_GetStatus(&status);
+  CanBridge_GetResult(&result);
+  WriterBegin(&writer, connection, http_status);
+  WriterPrintf(&writer,
+    "{\"active\":%s,\"connected\":%s,\"session_id\":%lu,"
+    "\"lease_remaining_ms\":%lu,\"request_pending\":%s,"
+    "\"pending_count\":%lu,"
+    "\"client_request_id\":%lu,\"tx_sequence\":%lu,"
+    "\"requests\":%lu,\"completed\":%lu,\"aborted\":%lu,"
+    "\"timeouts\":%lu,\"rejected\":%lu,\"unsolicited_frames\":%lu,"
+    "\"last_result\":\"%s\",\"result_generation\":%lu}\n",
+    status.active ? "true" : "false",
+    status.connected ? "true" : "false",
+    (unsigned long)status.session_id,
+    (unsigned long)status.lease_remaining_ms,
+    status.request_pending ? "true" : "false",
+    (unsigned long)status.pending_count,
+    (unsigned long)status.client_request_id,
+    (unsigned long)status.tx_sequence,
+    (unsigned long)status.requests,
+    (unsigned long)status.completed,
+    (unsigned long)status.aborted,
+    (unsigned long)status.timeouts,
+    (unsigned long)status.rejected,
+    (unsigned long)status.unsolicited_frames,
+    CanBridge_ResultName(result.code),
+    (unsigned long)result.generation);
+  WriterEnd(&writer);
+}
+
+static void HandleBridgeEnable(struct netconn *connection)
+{
+  CanBridgeStatus before;
+  CanBridge_GetStatus(&before);
+  if (!CanBridge_Enable(NULL))
+  {
+    SendError(connection, "409 Conflict", "bridge_can_busy",
+              "CAN must be synchronized and the normal transmit queue must be idle");
+    return;
+  }
+  if (!before.active)
+  {
+    taskENTER_CRITICAL();
+    bridge_stream_sequence = websocket_write_sequence;
+    taskEXIT_CRITICAL();
+  }
+  WriteBridgeStatus(connection, "202 Accepted");
+}
+
+static void HandleBridgeDisable(struct netconn *connection)
+{
+  CanBridge_Disable();
+  WriteBridgeStatus(connection, "202 Accepted");
+}
+
 static void HandleCanModeGet(struct netconn *connection, const char *status)
 {
   JsonWriter writer;
@@ -1384,12 +1887,13 @@ static void HandleCanModeGet(struct netconn *connection, const char *status)
                "{\"mode\":\"%s\",\"tx_gate_enabled\":%s,"
                "\"bitrate_kbps\":%lu,\"sync_state\":\"%s\","
                "\"safety_reason\":\"%s\",\"queue_depth\":%lu,"
-               "\"transmitting\":%s}\n",
+               "\"transmitting\":%s,\"bridge_active\":%s}\n",
                CanControl_OperatingModeName(capture.operating_mode),
                capture.tx_gate_enabled ? "true" : "false",
                (unsigned long)capture.bitrate_kbps, SyncStateName(capture.state),
                CanControl_SafetyReasonName(capture.safety_reason),
-               (unsigned long)tx.queue_depth, tx.transmitting ? "true" : "false");
+               (unsigned long)tx.queue_depth, tx.transmitting ? "true" : "false",
+               CanBridge_IsActive() ? "true" : "false");
   WriterEnd(&writer);
 }
 
@@ -1397,6 +1901,12 @@ static void HandleCanModePost(struct netconn *connection, const char *body)
 {
   char mode[16];
   bool confirmed = false;
+  if (CanBridge_IsActive())
+  {
+    SendError(connection, "409 Conflict", "bridge_active",
+              "CAN mode is controlled by the active bridge session");
+    return;
+  }
   if (!JsonReadString(body, "mode", mode, sizeof(mode)))
   {
     SendError(connection, "422 Unprocessable Entity", "invalid_mode",
@@ -1439,6 +1949,13 @@ static void HandleCanTxPost(struct netconn *connection, const char *body)
   uint32_t sequence;
   uint32_t period_ms = 0U;
   char command[16];
+
+  if (CanBridge_IsActive())
+  {
+    SendError(connection, "409 Conflict", "bridge_active",
+              "Local and web SDO transmission is disabled in bridge mode");
+    return;
+  }
 
   request.timeout_ms = CAN_TX_DEFAULT_TIMEOUT_MS;
   if (!JsonReadUnsigned(body, "node_id", &value) ||
@@ -1559,7 +2076,8 @@ static void HandleCanTxStatus(struct netconn *connection)
     (unsigned long)tx.timeouts, (unsigned long)tx.arbitration_lost,
     (unsigned long)tx.bus_off, (unsigned long)tx.errors,
     (unsigned long)tx.last_sequence, CanTx_ResultName(tx.last_result),
-    (unsigned int)(1000U / CAN_TX_MIN_INTERVAL_MS),
+    (unsigned int)(CanBridge_IsActive() ? 0U :
+                   (1000U / CAN_TX_MIN_INTERVAL_MS)),
     tx.periodic_active ? "true" : "false",
     (unsigned long)tx.periodic_sequence,
     (unsigned long)tx.periodic_period_ms,
@@ -2414,6 +2932,15 @@ static bool Dispatch(struct netconn *connection, char *request)
     HandleCanTxPeriodicStop(connection);
   else if ((strcmp(method, "POST") == 0) && ParseTxCancelPath(path, &tx_sequence))
     HandleCanTxCancel(connection, tx_sequence);
+  else if ((strcmp(method, "POST") == 0) &&
+           (strcmp(path, "/api/v1/bridge/enable") == 0))
+    HandleBridgeEnable(connection);
+  else if ((strcmp(method, "POST") == 0) &&
+           (strcmp(path, "/api/v1/bridge/disable") == 0))
+    HandleBridgeDisable(connection);
+  else if ((strcmp(method, "GET") == 0) &&
+           (strcmp(path, "/api/v1/bridge/status") == 0))
+    WriteBridgeStatus(connection, "200 OK");
   else if ((strcmp(method, "GET") == 0) && (strcmp(path, "/api/v1/config/logger") == 0))
     WriteLoggerConfig(connection, "200 OK");
   else if ((strcmp(method, "PUT") == 0) && (strcmp(path, "/api/v1/config/logger") == 0))
@@ -2451,6 +2978,12 @@ static bool Dispatch(struct netconn *connection, char *request)
     StatusIncrement(&public_status.completed_requests);
     return transferred;
   }
+  else if ((strcmp(method, "GET") == 0) && (strcmp(path, "/api/v1/bridge") == 0))
+  {
+    bool transferred = HandleBridgeWebSocketUpgrade(connection, request, query);
+    StatusIncrement(&public_status.completed_requests);
+    return transferred;
+  }
   else if ((strcmp(method, "GET") == 0) && (strncmp(path, "/api/", 5U) != 0))
     HandleWebAsset(connection, request, path, true);
   else if ((strcmp(method, "HEAD") == 0) && (strncmp(path, "/api/", 5U) != 0))
@@ -2469,11 +3002,20 @@ void ApiServer_Run(void)
   websocket_write_sequence = 0U;
   websocket_pending_connection = NULL;
   websocket_reserved = false;
+  bridge_pending_connection = NULL;
+  bridge_websocket_reserved = false;
+  bridge_pending_session_id = 0U;
+  bridge_stream_sequence = 0U;
   websocket_task_handle = xTaskCreateStatic(WebSocketTask, "wsLiveTask",
                                              WEBSOCKET_TASK_STACK_WORDS, NULL,
                                              tskIDLE_PRIORITY + 1U,
                                              websocket_task_stack,
                                              &websocket_task_control);
+  bridge_task_handle = xTaskCreateStatic(BridgeWebSocketTask, "wsBridgeTask",
+                                          BRIDGE_TASK_STACK_WORDS, NULL,
+                                          tskIDLE_PRIORITY + 1U,
+                                          bridge_task_stack,
+                                          &bridge_task_control);
   for (;;)
   {
     struct netconn *listener;
@@ -2490,7 +3032,7 @@ void ApiServer_Run(void)
     }
     netconn_set_recvtimeout(listener, 1000);
     if ((netconn_bind(listener, IP_ADDR_ANY, bound_port) != ERR_OK) ||
-        (netconn_listen_with_backlog(listener, 2U) != ERR_OK))
+        (netconn_listen_with_backlog(listener, 6U) != ERR_OK))
     {
       netconn_delete(listener);
       vTaskDelay(pdMS_TO_TICKS(1000U));
@@ -2535,6 +3077,7 @@ void ApiServer_Run(void)
           netconn_delete(connection);
         }
       }
+      CanBridge_Update();
       AppSettings_Get(&settings);
       if (settings.network.http_port != bound_port)
       {
@@ -2548,10 +3091,12 @@ void ApiServer_Run(void)
 
 void ApiServer_SubmitFrame(const CanFrameRecord *frame)
 {
+  CanFrameRecord stream_frame;
   if (frame == NULL)
   {
     return;
   }
+  CanBridge_ProcessFrame(frame, &stream_frame);
   taskENTER_CRITICAL();
   frame_history[frame_history_write] = *frame;
   frame_history_write = (frame_history_write + 1U) % API_FRAME_SNAPSHOT_MAX;
@@ -2559,7 +3104,8 @@ void ApiServer_SubmitFrame(const CanFrameRecord *frame)
   {
     ++frame_history_count;
   }
-  websocket_ring[websocket_write_sequence & (WEBSOCKET_RING_CAPACITY - 1U)] = *frame;
+  websocket_ring[websocket_write_sequence & (WEBSOCKET_RING_CAPACITY - 1U)] =
+    stream_frame;
   ++websocket_write_sequence;
   taskEXIT_CRITICAL();
 }

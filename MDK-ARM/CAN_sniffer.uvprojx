@@ -410,6 +410,16 @@
               <FilePath>../Core/Src/can_capture.c</FilePath>
             </File>
             <File>
+              <FileName>can_bridge.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/can_bridge.c</FilePath>
+            </File>
+            <File>
+              <FileName>can_scanner.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/can_scanner.c</FilePath>
+            </File>
+            <File>
               <FileName>app_watchdog.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/app_watchdog.c</FilePath>

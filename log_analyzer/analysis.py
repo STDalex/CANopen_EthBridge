@@ -179,6 +179,43 @@ def _session_state(csl_files: Sequence[Path], bad_files: Sequence[Path],
 
 
 def scan_sessions(path: str | Path) -> list[SessionInfo]:
+    source = Path(path).expanduser()
+    if source.is_file():
+        if source.suffix.upper() != ".CSL":
+            raise ValueError(f"Ожидается файл .CSL: {source}")
+        try:
+            with source.open("rb") as stream:
+                header = parse_header(
+                    source, read_exact(stream, FILE_HEADER_SIZE, "file header")
+                )
+        except (OSError, CSLFormatError) as error:
+            raise CSLFormatError(f"{source.name}: {error}") from error
+        selected_nodes = tuple(
+            node
+            for node in range(1, 128)
+            if header.node_filter[node // 8] & (1 << (node % 8))
+        )
+        state = _session_state([source], [], False)
+        return [
+            SessionInfo(
+                path=source,
+                name=f"S{header.session_id:06d}",
+                session_id=header.session_id,
+                bitrate=header.bitrate,
+                mode="Full" if header.mode == 1 else "Selected" if header.mode == 2 else str(header.mode),
+                selected_nodes=selected_nodes,
+                firmware=header.firmware,
+                file_count=1,
+                total_bytes=source.stat().st_size,
+                metadata_frames=None,
+                clean_close=state in ("Закрыта", "Восстановлена"),
+                recovered=state == "Восстановлена",
+                state=state,
+                bad_files=0,
+                metadata_error="SESSION.JSON отсутствует: открыт отдельный файл, скачанный через web",
+            )
+        ]
+
     root = normalize_logs_root(path)
     if root.name.upper().startswith("S") and any(root.glob("*.CSL")):
         directories = [root]
@@ -242,6 +279,8 @@ def scan_sessions(path: str | Path) -> list[SessionInfo]:
 
 
 def session_files(session: SessionInfo) -> list[Path]:
+    if session.path.is_file():
+        return [session.path]
     return sorted(session.path.glob("*.CSL"), key=lambda item: item.name.upper())
 
 

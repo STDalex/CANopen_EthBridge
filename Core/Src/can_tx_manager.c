@@ -10,10 +10,18 @@
 
 #include <string.h>
 
+typedef enum
+{
+  CAN_TX_OWNER_NORMAL = 0,
+  CAN_TX_OWNER_BRIDGE,
+  CAN_TX_OWNER_SCANNER
+} CanTxOwner;
+
 typedef struct
 {
   uint32_t sequence;
   CanTxFrame frame;
+  CanTxOwner owner;
   bool periodic;
 } CanTxQueueEntry;
 
@@ -44,6 +52,7 @@ static CanTxHistoryEntry periodic_history;
 static bool periodic_history_valid;
 static uint32_t auto_silent_deadline;
 static bool auto_silent_armed;
+static CanTxOwner tx_owner;
 
 static bool IsPendingLocked(uint32_t sequence)
 {
@@ -240,6 +249,7 @@ void CanTxManager_Init(void)
   periodic_history_valid = false;
   auto_silent_deadline = 0U;
   auto_silent_armed = false;
+  tx_owner = CAN_TX_OWNER_NORMAL;
   public_status.last_result = CAN_TX_RESULT_MODE_DISABLED;
   tx_queue = xQueueCreateStatic(CAN_TX_QUEUE_CAPACITY, sizeof(CanTxQueueEntry),
                                 tx_queue_storage, &tx_queue_control);
@@ -263,7 +273,8 @@ static bool ValidateFrame(const CanTxFrame *frame)
   return true;
 }
 
-static CanTxSubmitResult SubmitFrame(const CanTxFrame *frame, uint32_t *sequence)
+static CanTxSubmitResult SubmitFrame(const CanTxFrame *frame, uint32_t *sequence,
+                                     CanTxOwner owner)
 {
   CanTxQueueEntry entry;
   CanCaptureStatus capture;
@@ -274,6 +285,11 @@ static CanTxSubmitResult SubmitFrame(const CanTxFrame *frame, uint32_t *sequence
     return CAN_TX_SUBMIT_MODE_DISABLED;
 
   taskENTER_CRITICAL();
+  if (tx_owner != owner)
+  {
+    taskEXIT_CRITICAL();
+    return CAN_TX_SUBMIT_MODE_DISABLED;
+  }
   if (pending_count >= CAN_TX_QUEUE_CAPACITY)
   {
     taskEXIT_CRITICAL();
@@ -284,6 +300,7 @@ static CanTxSubmitResult SubmitFrame(const CanTxFrame *frame, uint32_t *sequence
   pending_sequences[pending_count++] = entry.sequence;
   taskEXIT_CRITICAL();
   entry.frame = *frame;
+  entry.owner = owner;
   entry.periodic = false;
 
   if (xQueueSend(tx_queue, &entry, 0U) != pdPASS)
@@ -391,7 +408,86 @@ CanTxSubmitResult CanTx_SubmitSdo(const CanTxSdoRequest *request,
 {
   CanTxFrame frame;
   if (!CanTx_BuildSdoRequest(request, &frame)) return CAN_TX_SUBMIT_INVALID;
-  return SubmitFrame(&frame, sequence);
+  return SubmitFrame(&frame, sequence, CAN_TX_OWNER_NORMAL);
+}
+
+CanTxSubmitResult CanTx_SubmitBridgeSdo(const CanTxSdoRequest *request,
+                                       uint32_t *sequence)
+{
+  CanTxFrame frame;
+  if (!CanTx_BuildSdoRequest(request, &frame)) return CAN_TX_SUBMIT_INVALID;
+  return SubmitFrame(&frame, sequence, CAN_TX_OWNER_BRIDGE);
+}
+
+bool CanTx_SetBridgeExclusive(bool enabled)
+{
+  bool accepted = true;
+  taskENTER_CRITICAL();
+  if (enabled && ((tx_owner != CAN_TX_OWNER_NORMAL) ||
+                  (pending_count != 0U) || periodic_state.enabled ||
+                  public_status.transmitting || cancel_all_requested))
+  {
+    accepted = false;
+  }
+  else if (enabled)
+  {
+    tx_owner = CAN_TX_OWNER_BRIDGE;
+  }
+  else if (tx_owner == CAN_TX_OWNER_BRIDGE)
+  {
+    tx_owner = CAN_TX_OWNER_NORMAL;
+  }
+  else if (tx_owner != CAN_TX_OWNER_NORMAL)
+  {
+    accepted = false;
+  }
+  else
+  {
+    tx_owner = CAN_TX_OWNER_NORMAL;
+  }
+  taskEXIT_CRITICAL();
+  return accepted;
+}
+
+CanTxSubmitResult CanTx_SubmitScannerSdo(const CanTxSdoRequest *request,
+                                        uint32_t *sequence)
+{
+  CanTxFrame frame;
+  if (!CanTx_BuildSdoRequest(request, &frame)) return CAN_TX_SUBMIT_INVALID;
+  return SubmitFrame(&frame, sequence, CAN_TX_OWNER_SCANNER);
+}
+
+bool CanTx_SetScannerExclusive(bool enabled)
+{
+  bool accepted = true;
+  taskENTER_CRITICAL();
+  if (enabled)
+  {
+    if (tx_owner != CAN_TX_OWNER_NORMAL)
+    {
+      accepted = false;
+    }
+    else
+    {
+      /* Ownership changes before cancellation is observed, so no new normal
+         or bridge request can enter while the old queue drains. */
+      tx_owner = CAN_TX_OWNER_SCANNER;
+      periodic_state.enabled = false;
+      public_status.periodic_active = false;
+      auto_silent_armed = false;
+      cancel_all_requested = true;
+    }
+  }
+  else if (tx_owner == CAN_TX_OWNER_SCANNER)
+  {
+    tx_owner = CAN_TX_OWNER_NORMAL;
+  }
+  else if (tx_owner != CAN_TX_OWNER_NORMAL)
+  {
+    accepted = false;
+  }
+  taskEXIT_CRITICAL();
+  return accepted;
 }
 
 CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
@@ -409,6 +505,11 @@ CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
     return CAN_TX_SUBMIT_INVALID;
   }
   taskENTER_CRITICAL();
+  if (tx_owner != CAN_TX_OWNER_NORMAL)
+  {
+    taskEXIT_CRITICAL();
+    return CAN_TX_SUBMIT_MODE_DISABLED;
+  }
   if (periodic_state.enabled)
   {
     taskEXIT_CRITICAL();
@@ -495,8 +596,10 @@ void CanTx_GetStatus(CanTxStatus *status)
   if (status == NULL) return;
   taskENTER_CRITICAL();
   *status = public_status;
-  status->queue_depth = (tx_queue != NULL) ?
-    (uint32_t)uxQueueMessagesWaiting(tx_queue) : 0U;
+  /* pending_count also includes the entry currently waiting for ACTIVE/rate
+     limit or a hardware mailbox. This prevents a bridge session from being
+     enabled in the short gap after xQueueReceive() and before transmission. */
+  status->queue_depth = pending_count;
   taskEXIT_CRITICAL();
 }
 
@@ -625,7 +728,8 @@ static uint32_t ProcessEntry(const CanTxQueueEntry *entry, uint32_t last_attempt
     if (entry->periodic) (void)CanTx_StopPeriodic();
     return last_attempt;
   }
-  while ((uint32_t)(HAL_GetTick() - last_attempt) < CAN_TX_MIN_INTERVAL_MS)
+  while ((entry->owner != CAN_TX_OWNER_BRIDGE) &&
+         ((uint32_t)(HAL_GetTick() - last_attempt) < CAN_TX_MIN_INTERVAL_MS))
   {
     if (cancel_all_requested ||
         (entry->periodic && !PeriodicStillEnabled(entry->sequence)))
@@ -641,8 +745,15 @@ static uint32_t ProcessEntry(const CanTxQueueEntry *entry, uint32_t last_attempt
   if (!entry->periodic)
   {
     taskENTER_CRITICAL();
-    auto_silent_deadline = HAL_GetTick() + entry->frame.timeout_ms;
-    auto_silent_armed = true;
+    /* A scanner pass is a sequence of one-shot SDO reads and owns TX for its
+       whole lifetime. Returning to silent after every node would tear down
+       that pass and be reported as a CAN error. Normal one-shot requests keep
+       the original fail-safe auto-silent behaviour. */
+    if (tx_owner != CAN_TX_OWNER_SCANNER)
+    {
+      auto_silent_deadline = HAL_GetTick() + entry->frame.timeout_ms;
+      auto_silent_armed = true;
+    }
     taskEXIT_CRITICAL();
   }
   return last_attempt;
@@ -681,6 +792,7 @@ void CanTxManager_Task(void)
     {
       entry.sequence = periodic_state.sequence;
       entry.frame = periodic_state.frame;
+      entry.owner = CAN_TX_OWNER_NORMAL;
       entry.periodic = true;
       periodic_state.next_due_tick = HAL_GetTick() + periodic_state.period_ms;
       ++public_status.queued;
