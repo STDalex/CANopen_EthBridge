@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0a1118">
+  <meta name="description" content="Документация CAN–Ethernet Bridge API v1 для разработчиков">
+  <title>CanSniff · CAN Bridge API v1</title>
+  <link rel="preconnect" href="https://unpkg.com">
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #091018;
+      --panel: #101b26;
+      --panel-2: #142332;
+      --line: #243746;
+      --text: #e8f2f7;
+      --muted: #91a6b5;
+      --cyan: #45d8c6;
+      --blue: #72aaff;
+      --violet: #bd93f9;
+      --amber: #ffc568;
+      --red: #ff7b82;
+      --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      --sans: Inter, "Segoe UI", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background:
+        radial-gradient(circle at 82% -10%, #17384c 0, transparent 31rem),
+        radial-gradient(circle at -12% 32%, #132a2a 0, transparent 28rem),
+        var(--bg);
+      color: var(--text);
+      font: 15px/1.65 var(--sans);
+    }
+    a { color: var(--cyan); text-underline-offset: 3px; }
+    code, pre { font-family: var(--mono); }
+    code { color: #c9f8ef; }
+    .shell { width: min(1240px, calc(100% - 32px)); margin: 0 auto; }
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid #253947cc;
+      background: #091018e8;
+      backdrop-filter: blur(16px);
+    }
+    .topbar .shell {
+      min-height: 66px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+    .brand { display: flex; align-items: center; gap: 11px; color: var(--text); text-decoration: none; }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 38px;
+      height: 38px;
+      border: 1px solid #45d8c677;
+      border-radius: 11px;
+      background: #15302f;
+      color: var(--cyan);
+      font-weight: 850;
+      letter-spacing: -1px;
+      box-shadow: inset 0 0 20px #45d8c610;
+    }
+    .brand-text { line-height: 1.2; }
+    .brand-text strong, .brand-text small { display: block; }
+    .brand-text small { color: var(--muted); font-size: 11px; }
+    .nav { display: flex; align-items: center; gap: 5px; overflow-x: auto; }
+    .nav a {
+      padding: 8px 10px;
+      border-radius: 8px;
+      color: var(--muted);
+      text-decoration: none;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+    .nav a:hover { color: var(--text); background: #172532; }
+    .hero { padding: 80px 0 48px; }
+    .hero-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(300px, .7fr); gap: 48px; align-items: center; }
+    .kicker { color: var(--cyan); font: 700 12px/1.4 var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+    h1 { max-width: 850px; margin: 12px 0 18px; font-size: clamp(38px, 6vw, 70px); line-height: .98; letter-spacing: -.045em; }
+    .lead { max-width: 780px; margin: 0; color: #bdd0dc; font-size: clamp(17px, 2vw, 21px); line-height: 1.55; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 42px;
+      padding: 0 16px;
+      border: 1px solid transparent;
+      border-radius: 9px;
+      background: var(--cyan);
+      color: #071412;
+      font-weight: 750;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .button.secondary { border-color: var(--line); background: #142330; color: var(--text); }
+    .button:hover { filter: brightness(1.08); }
+    .terminal {
+      overflow: hidden;
+      border: 1px solid #2a4152;
+      border-radius: 15px;
+      background: #081018;
+      box-shadow: 0 24px 70px #0007;
+      transform: rotate(1.2deg);
+    }
+    .terminal-head { display: flex; align-items: center; gap: 7px; padding: 12px 14px; border-bottom: 1px solid #1d2b37; color: var(--muted); font: 11px var(--mono); }
+    .lamp { width: 8px; height: 8px; border-radius: 50%; background: #ff756f; }
+    .lamp:nth-child(2) { background: var(--amber); }
+    .lamp:nth-child(3) { background: var(--cyan); margin-right: 7px; }
+    .terminal pre { margin: 0; padding: 20px; color: #c7d7df; font-size: 12px; line-height: 1.7; overflow: auto; }
+    .prompt { color: var(--cyan); }
+    .json-key { color: var(--blue); }
+    .json-value { color: var(--amber); }
+    section { padding: 44px 0; }
+    .section-head { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 32px; margin-bottom: 24px; }
+    .section-head h2 { margin: 0; font-size: clamp(26px, 4vw, 42px); line-height: 1.1; letter-spacing: -.025em; }
+    .section-head p { margin: 4px 0 0; color: var(--muted); max-width: 760px; }
+    .eyebrow { color: var(--cyan); font: 700 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
+    .grid { display: grid; gap: 14px; }
+    .grid.three { grid-template-columns: repeat(3, 1fr); }
+    .grid.two { grid-template-columns: repeat(2, 1fr); }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: linear-gradient(145deg, #13212d, #0e1821);
+      box-shadow: 0 14px 38px #0003;
+      padding: 20px;
+    }
+    .card h3 { margin: 8px 0 8px; font-size: 18px; }
+    .card p { margin: 0; color: var(--muted); }
+    .metric { color: var(--cyan); font: 800 28px/1 var(--mono); }
+    .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; counter-reset: step; }
+    .flow article { position: relative; min-height: 175px; }
+    .flow article::before {
+      counter-increment: step;
+      content: "0" counter(step);
+      display: block;
+      margin-bottom: 22px;
+      color: var(--cyan);
+      font: 800 22px var(--mono);
+    }
+    .flow article:not(:last-child)::after { content: "→"; position: absolute; right: -20px; top: 17px; z-index: 2; color: #527083; font-size: 20px; }
+    .callout { border-left: 3px solid var(--amber); background: #2a2318; }
+    .callout strong { color: #ffe0a8; }
+    .callout.danger { border-left-color: var(--red); background: #2d191d; }
+    .callout.danger strong { color: #ffd3d6; }
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; min-width: 650px; background: #0e1821; }
+    th, td { padding: 13px 16px; border-bottom: 1px solid #1f303d; text-align: left; vertical-align: top; }
+    th { color: var(--muted); background: #13212d; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    tr:last-child td { border-bottom: 0; }
+    .tag { display: inline-flex; align-items: center; min-height: 23px; padding: 0 8px; border-radius: 12px; background: #1a3341; color: var(--cyan); font: 700 11px var(--mono); }
+    .tag.amber { background: #382c1a; color: var(--amber); }
+    .tag.violet { background: #2b2240; color: #d8bcff; }
+    .code-tabs { overflow: hidden; border: 1px solid var(--line); border-radius: 13px; background: #081018; }
+    .code-tablist { display: flex; gap: 3px; padding: 8px; border-bottom: 1px solid #1d2b37; }
+    .code-tablist button { padding: 8px 11px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: 12px var(--mono); cursor: pointer; }
+    .code-tablist button[aria-selected="true"] { background: #18303a; color: var(--cyan); }
+    .code-panel { display: none; }
+    .code-panel.active { display: block; }
+    .code-panel pre { margin: 0; padding: 20px; overflow: auto; color: #d6e2e9; font-size: 12px; line-height: 1.65; }
+    .swagger-shell { overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: #eef3f6; }
+    .swagger-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 16px; background: #12202b; border-bottom: 1px solid var(--line); }
+    .swagger-toolbar span { color: var(--muted); font-size: 12px; }
+    .swagger-toolbar .button { min-height: 34px; font-size: 12px; }
+    .swagger-placeholder { padding: 30px; color: #334; background: #f2f5f7; }
+    .swagger-ui .topbar, .swagger-ui .scheme-container { display: none; }
+    .swagger-ui { padding: 14px 8px 26px; }
+    .swagger-ui .info { margin: 20px 0; }
+    .swagger-ui .info .title { font-size: 28px; }
+    .swagger-ui .opblock-tag { font-size: 19px; }
+    .swagger-ui .model-box { background: #f6f8fa; }
+    .limits { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .limit { display: grid; grid-template-columns: 36px 1fr; gap: 12px; align-items: start; padding: 14px 16px; border: 1px solid var(--line); border-radius: 11px; background: #0f1a24; }
+    .limit span { color: var(--amber); font: 800 18px var(--mono); }
+    .limit p { margin: 0; color: #c0d0da; }
+    .footer { margin-top: 42px; padding: 28px 0 40px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .footer .shell { display: flex; justify-content: space-between; gap: 20px; }
+
+    @media (max-width: 900px) {
+      .hero-grid, .section-head { grid-template-columns: 1fr; }
+      .grid.three, .flow { grid-template-columns: repeat(2, 1fr); }
+      .flow article::after { display: none; }
+      .nav a:not(:last-child) { display: none; }
+    }
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 22px, 1240px); }
+      .hero { padding-top: 54px; }
+      .hero-grid { gap: 30px; }
+      .terminal { transform: none; }
+      .grid.three, .grid.two, .flow, .limits { grid-template-columns: 1fr; }
+      .swagger-toolbar { align-items: flex-start; flex-direction: column; }
+      .footer .shell { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell">
+      <a class="brand" href="#top">
+        <span class="brand-mark">CS</span>
+        <span class="brand-text"><strong>CanSniff</strong><small>Developer documentation</small></span>
+      </a>
+      <nav class="nav" aria-label="Разделы документации">
+        <a href="#logic">Логика</a>
+        <a href="#protocol">WebSocket</a>
+        <a href="#reliability">Надёжность</a>
+        <a href="#limits">Ограничения</a>
+        <a href="#swagger">Swagger API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="shell hero-grid">
+        <div>
+          <div class="kicker">CAN–Ethernet Bridge · protocol v1</div>
+          <h1>Управляемый доступ к CANopen через Ethernet</h1>
+          <p class="lead">API для диагностических клиентов, которым нужны транзакции expedited SDO и непрерывный поток всех кадров CAN. Bridge управляет режимом передачи и безопасно возвращает устройство в SILENT при завершении сессии.</p>
+          <div class="hero-actions">
+            <a class="button" href="#quickstart">Начать интеграцию</a>
+            <a class="button secondary" href="#swagger">Открыть Swagger</a>
+          </div>
+        </div>
+        <div class="terminal" aria-label="Пример обмена">
+          <div class="terminal-head"><span class="lamp"></span><span class="lamp"></span><span class="lamp"></span>ws://192.168.1.7/api/v1/bridge</div>
+          <pre><span class="prompt">←</span> {<span class="json-key">"type"</span>:<span class="json-value">"hello"</span>, <span class="json-key">"protocol"</span>:1}
+
+<span class="prompt">→</span> {<span class="json-key">"type"</span>:<span class="json-value">"sdo"</span>, <span class="json-key">"request_id"</span>:1,
+   <span class="json-key">"node_id"</span>:7, <span class="json-key">"command"</span>:<span class="json-value">"read"</span>,
+   <span class="json-key">"index"</span>:24584, <span class="json-key">"subindex"</span>:0}
+
+<span class="prompt">←</span> {<span class="json-key">"type"</span>:<span class="json-value">"ack"</span>, <span class="json-key">"status"</span>:<span class="json-value">"accepted"</span>}
+<span class="prompt">←</span> {<span class="json-key">"type"</span>:<span class="json-value">"result"</span>, <span class="json-key">"status"</span>:<span class="json-value">"completed"</span>}</pre>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="purpose-title">
+      <div class="shell">
+        <div class="section-head">
+          <div class="eyebrow">01 · Назначение</div>
+          <div><h2 id="purpose-title">Не прозрачный туннель, а диспетчер SDO-транзакций</h2><p>Клиент не отправляет произвольные CAN-кадры. Он описывает операцию CANopen, а прошивка формирует стандартный COB-ID, контролирует передачу, сопоставляет ответ и возвращает итог.</p></div>
+        </div>
+        <div class="grid three">
+          <article class="card"><span class="metric">SDO</span><h3>Чтение и запись объектов</h3><p>Поддерживаются expedited read и write на 8, 16, 24 или 32 бита для Node ID 1…127.</p></article>
+          <article class="card"><span class="metric">CSWS</span><h3>Параллельный CAN-поток</h3><p>В том же WebSocket приходят бинарные пакеты со всеми кадрами, метками времени и признаками Bridge-транзакций.</p></article>
+          <article class="card"><span class="metric">10 s</span><h3>Fail-safe lease</h3><p>Если heartbeat исчезает, Bridge отменяет ожидания, освобождает TX и принудительно переводит CAN в SILENT.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section id="logic" aria-labelledby="logic-title">
+      <div class="shell">
+        <div class="section-head">
+          <div class="eyebrow">02 · Общая логика</div>
+          <div><h2 id="logic-title">Жизненный цикл соединения</h2><p>REST управляет сессией. WebSocket переносит команды, результаты и поток CAN. Клиент должен хранить <code>session_id</code> и уникальные ненулевые <code>request_id</code>.</p></div>
+        </div>
+        <div class="flow">
+          <article class="card"><h3>Проверить</h3><p><code>GET /status</code>. Если <code>active=true</code> и <code>connected=true</code>, Bridge уже занят.</p></article>
+          <article class="card"><h3>Включить</h3><p><code>POST /enable</code> резервирует CAN TX и возвращает <code>session_id</code>. CAN должен быть синхронизирован.</p></article>
+          <article class="card"><h3>Подключить WS</h3><p>Открыть <code>/bridge?session_id=…</code>, дождаться <code>hello</code>, затем отправлять SDO-команды.</p></article>
+          <article class="card"><h3>Завершить</h3><p>Закрыть WebSocket и вызвать <code>POST /disable</code>. При аварии это сделает lease по истечении 10 секунд.</p></article>
+        </div>
+        <div class="grid two" style="margin-top:14px">
+          <aside class="card callout"><strong>Повторное подключение.</strong><p>После сетевого обрыва тот же <code>session_id</code> можно использовать до истечения lease, если прежний WebSocket уже освобождён.</p></aside>
+          <aside class="card callout danger"><strong>Bridge — эксклюзивный владелец TX.</strong><p>Пока он активен, изменение CAN-конфигурации и режима, локальные SDO и <code>/api/v1/can/tx</code> блокируются. Мониторинг и logger продолжают работать.</p></aside>
+        </div>
+      </div>
+    </section>
+
+    <section id="protocol" aria-labelledby="protocol-title">
+      <div class="shell">
+        <div class="section-head">
+          <div class="eyebrow">03 · WebSocket</div>
+          <div><h2 id="protocol-title">Текстовые события + бинарный поток</h2><p>Текстовые сообщения — UTF-8 JSON. Клиентские WebSocket-кадры должны быть masked и не фрагментированы; текстовый payload ограничен 512 байтами.</p></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Направление</th><th>type</th><th>Назначение</th><th>Ключевые поля</th></tr></thead>
+            <tbody>
+              <tr><td>server → client</td><td><span class="tag">hello</span></td><td>Первое сообщение после upgrade</td><td><code>protocol</code>, <code>session_id</code>, <code>lease_ms</code>, <code>sequence</code></td></tr>
+              <tr><td>client → server</td><td><span class="tag violet">sdo</span></td><td>Expedited SDO-запрос</td><td><code>request_id</code>, <code>node_id</code>, <code>command</code>, <code>index</code>, <code>subindex</code>, <code>value?</code>, <code>timeout_ms?</code></td></tr>
+              <tr><td>server → client</td><td><span class="tag amber">ack</span></td><td>Синхронное принятие или отклонение</td><td><code>request_id</code>, <code>tx_sequence</code>, <code>status</code></td></tr>
+              <tr><td>server → client</td><td><span class="tag">result</span></td><td>Итог после CAN-ответа или ошибки</td><td><code>status</code>, <code>capture_time_us</code>, <code>abort_code</code>, <code>can_id</code>, <code>data</code></td></tr>
+              <tr><td>both</td><td><span class="tag violet">ping / pong</span></td><td>Прикладной heartbeat</td><td>Без дополнительных полей</td></tr>
+              <tr><td>server → client</td><td><span class="tag amber">binary</span></td><td>Пакет <code>CSWS</code> v1</td><td>Заголовок 16 байт + 0…60 записей по 24 байта, little-endian</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="grid two" style="margin-top:14px">
+          <article class="card">
+            <div class="eyebrow">ack.status</div>
+            <p style="margin-top:10px"><code>accepted</code>, <code>duplicate</code>, <code>request_pending</code>, <code>invalid_request</code>, <code>can_not_ready</code>, <code>bridge_disabled</code>, <code>not_connected</code>.</p>
+          </article>
+          <article class="card">
+            <div class="eyebrow">result.status</div>
+            <p style="margin-top:10px"><code>completed</code>, <code>abort</code>, <code>timeout</code>, <code>bus_off</code>, <code>driver_error</code>, <code>cancelled</code>, <code>protocol_error</code>.</p>
+          </article>
+        </div>
+
+        <h3 style="margin-top:30px">Формат бинарного пакета CSWS v1</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Смещение</th><th>Размер</th><th>Поле</th><th>Описание</th></tr></thead>
+            <tbody>
+              <tr><td>0</td><td>4</td><td><code>magic</code></td><td>ASCII <code>CSWS</code></td></tr>
+              <tr><td>4</td><td>1</td><td><code>version</code></td><td><code>1</code></td></tr>
+              <tr><td>5</td><td>1</td><td><code>flags</code></td><td>bit 0 = до пакета были потери</td></tr>
+              <tr><td>6</td><td>2</td><td><code>count</code></td><td>Число записей, максимум 60</td></tr>
+              <tr><td>8</td><td>4</td><td><code>sequence</code></td><td>Sequence первого кадра</td></tr>
+              <tr><td>12</td><td>4</td><td><code>lost_count</code></td><td>Число кадров, вытесненных из кольца перед пакетом</td></tr>
+              <tr><td>16 + N×24</td><td>24</td><td><code>frame[N]</code></td><td><code>u64 time_us</code>, <code>u32 can_id</code>, <code>u8 flags</code>, <code>u8 dlc</code>, 2 reserved, 8 data</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p style="color:var(--muted);margin-top:12px">Флаги записи: bit 0 — extended ID; 1 — RTR; 2 — локальная передача; 3 — запрос Bridge; 4 — ответ Bridge; 5 — сторонний кадр.</p>
+      </div>
+    </section>
+
+    <section id="quickstart" aria-labelledby="quickstart-title">
+      <div class="shell">
+        <div class="section-head">
+          <div class="eyebrow">04 · Quick start</div>
+          <div><h2 id="quickstart-title">Минимальная интеграция</h2><p>JSON использует десятичные числа: например, индекс <code>0x6008</code> передаётся как <code>24584</code>. Hex нужен только для поля <code>result.data</code>.</p></div>
+        </div>
+        <div class="code-tabs" data-code-tabs>
+          <div class="code-tablist" role="tablist">
+            <button role="tab" aria-selected="true" data-code-tab="curl">REST / curl</button>
+            <button role="tab" aria-selected="false" data-code-tab="js">WebSocket / JS</button>
+            <button role="tab" aria-selected="false" data-code-tab="python">CSWS / Python</button>
+          </div>
+          <div class="code-panel active" data-code-panel="curl"><pre>BASE=http://192.168.1.7
+
+# 1. Получить session_id
+curl -sS -X POST "$BASE/api/v1/bridge/enable" \
+  -H "Content-Type: application/json" -d '{}'
+
+# 2. Проверять состояние
+curl -sS "$BASE/api/v1/bridge/status"
+
+# 3. В конце обязательно выключить Bridge
+curl -sS -X POST "$BASE/api/v1/bridge/disable" \
+  -H "Content-Type: application/json" -d '{}'</pre></div>
+          <div class="code-panel" data-code-panel="js"><pre>const sessionId = 123; // из POST /enable
+const ws = new WebSocket(
+  `ws://192.168.1.7/api/v1/bridge?session_id=${sessionId}`
+);
+ws.binaryType = "arraybuffer";
+
+ws.onmessage = ({ data }) => {
+  if (typeof data !== "string") return parseCsws(data);
+  const message = JSON.parse(data);
+  if (message.type === "hello") {
+    ws.send(JSON.stringify({
+      type: "sdo", request_id: 1, node_id: 7,
+      command: "read", index: 0x6008,
+      subindex: 0, timeout_ms: 150
+    }));
+  }
+  if (message.type === "ack" && message.status !== "accepted" &&
+      message.status !== "duplicate") {
+    console.error("SDO rejected", message);
+  }
+  if (message.type === "result") console.log(message);
+};</pre></div>
+          <div class="code-panel" data-code-panel="python"><pre>import struct
+
+HEADER = struct.Struct("&lt;4sBBHII")
+FRAME = struct.Struct("&lt;QIBB2x8s")
+
+def parse_csws(payload: bytes):
+    magic, version, flags, count, sequence, lost = HEADER.unpack_from(payload)
+    if magic != b"CSWS" or version != 1:
+        raise ValueError("unsupported CSWS packet")
+    if len(payload) != HEADER.size + count * FRAME.size:
+        raise ValueError("invalid CSWS size")
+    for offset in range(HEADER.size, len(payload), FRAME.size):
+        timestamp_us, can_id, frame_flags, dlc, data = FRAME.unpack_from(payload, offset)
+        yield timestamp_us, can_id, frame_flags, data[:dlc]
+    return sequence, lost</pre></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="reliability" aria-labelledby="reliability-title">
+      <div class="shell">
+        <div class="section-head">
+          <div class="eyebrow">05 · Надёжность</div>
+          <div><h2 id="reliability-title">Не продолжайте обмен через повреждённый WebSocket</h2><p>CAN-ответ может быть успешно принят прошивкой, даже если соответствующий <code>result</code> не дошёл до клиента из-за временной сетевой паузы или разрыва TCP. Клиент должен отличать CAN timeout от ошибки транспорта и уметь восстановить сессию.</p></div>
+        </div>
+
+        <div class="grid two">
+          <article class="card">
+            <div class="eyebrow">Профилактика</div>
+            <h3>Освобождайте короткие сообщения сразу</h3>
+            <p>Для нативного TCP-клиента включите <code>TCP_NODELAY</code> до WebSocket handshake. Это не позволяет Nagle задержать короткий <code>sdo</code>, <code>ack</code> или <code>result</code> до delayed ACK. Браузерный WebSocket не предоставляет эту настройку; в браузере её контролирует сетевой стек.</p>
+          </article>
+          <article class="card">
+            <div class="eyebrow">Чтение потока</div>
+            <h3>Один непрерывный receive-loop</h3>
+            <p>Постоянно разбирайте все входящие кадры: текстовые <code>ack</code>/<code>result</code>, бинарные <code>CSWS</code>, ping и close. Если не вычитывать бинарный поток, TCP receive window заполнится и нужный <code>result</code> окажется за накопившимися данными.</p>
+          </article>
+          <article class="card">
+            <div class="eyebrow">Тайм-ауты</div>
+            <h3><code>ack</code> не завершает SDO</h3>
+            <p>После <code>accepted</code> ждите <code>result</code> с тем же <code>request_id</code>. Сетевой deadline должен быть больше переданного <code>timeout_ms</code>; практический запас — не менее 1 секунды. Socket timeout, EOF, invalid frame и отсутствие <code>result</code> являются ошибками транспорта, а не CAN timeout.</p>
+          </article>
+          <article class="card">
+            <div class="eyebrow">Восстановление</div>
+            <h3>Закрыть, переподключить, повторить</h3>
+            <p>После транспортной ошибки прекратите новые SDO через старый сокет. Закройте WebSocket, дождитесь освобождения подключения и присоединитесь с тем же <code>session_id</code> до окончания lease либо выполните управляемый цикл <code>/disable → /enable → hello</code>. Затем повторите незавершённое чтение.</p>
+          </article>
+        </div>
+
+        <aside class="card callout danger" style="margin-top:14px"><strong>Как распознать именно сетевой сбой.</strong><p>Если клиент не получил <code>result</code>, но <code>GET /api/v1/bridge/status</code> показывает рост <code>completed</code> при <code>timeouts=0</code>, инклинометр ответил и результат был сформирован: потерян транспорт до клиента. Не выполняйте ещё несколько циклов через тот же сокет — сразу пересоздайте WebSocket.</p></aside>
+
+        <h3 style="margin-top:30px">Рекомендуемый алгоритм клиента</h3>
+        <div class="code-tabs">
+          <div class="code-panel active"><pre># Для нативного клиента, до WebSocket handshake:
+socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)
+
+try:
+    send_sdo(request_id)
+    wait_ack(request_id)
+    result = wait_result(request_id, can_timeout + 1.0)
+except (SocketTimeout, ConnectionClosed, InvalidWebSocketFrame):
+    stop_sending_on_old_socket()
+    close_websocket()
+    reconnect_bridge_and_wait_hello()
+    result = retry_read(request_id)
+
+# При восстановлении той же сессии повторяйте тот же request_id:
+# Bridge распознает duplicate и вернёт сохранённый результат, если он ещё
+# находится среди последних 32 итогов.</pre></div>
+        </div>
+
+        <aside class="card callout" style="margin-top:14px"><strong>Осторожно с повтором записи.</strong><p>SDO read можно безопасно повторить. Для write после полного <code>/disable → /enable</code> исход предыдущей операции может быть неизвестен: сначала прочитайте объект и проверьте значение. Автоматически повторять <code>abort</code>, настоящий CAN <code>timeout</code> или <code>driver_error</code> без анализа причины не следует.</p></aside>
+      </div>
+    </section>
+
+    <section id="limits" aria-labelledby="limits-title">
+      <div class="shell">
+        <div class="section-head">
+          <div class="eyebrow">06 · Ограничения</div>
+          <div><h2 id="limits-title">Что должен учитывать клиент</h2><p>Ограничения ниже относятся к протоколу v1 и текущей реализации прошивки.</p></div>
+        </div>
+        <div class="limits">
+          <div class="limit"><span>01</span><p><strong>Только Classic CAN.</strong> CAN FD не поддерживается; DLC результата и потока не превышает 8.</p></div>
+          <div class="limit"><span>02</span><p><strong>Только expedited SDO.</strong> Segmented и block transfer завершаются <code>protocol_error</code>.</p></div>
+          <div class="limit"><span>03</span><p><strong>Predefined COB-ID.</strong> Запросы идут на <code>0x600 + node_id</code>, ответы ожидаются на <code>0x580 + node_id</code>.</p></div>
+          <div class="limit"><span>04</span><p><strong>Один WebSocket-клиент.</strong> Второе подключение получает HTTP <code>409 bridge_unavailable</code>.</p></div>
+          <div class="limit"><span>05</span><p><strong>Один pending на Node ID.</strong> Разные ноды можно опрашивать параллельно; повтор к занятой ноде получает <code>request_pending</code>.</p></div>
+          <div class="limit"><span>06</span><p><strong>TX-очередь 16 записей.</strong> При перегрузке подтверждение получает <code>can_not_ready</code>; клиент выбирает стратегию retry.</p></div>
+          <div class="limit"><span>07</span><p><strong>Результаты хранятся ограниченно.</strong> Последние 32 итога нужны для дедупликации; <code>request_id</code> следует увеличивать и не переиспользовать.</p></div>
+          <div class="limit"><span>08</span><p><strong>Поток lossy.</strong> Кольцо — 8192 кадра. Медленный клиент получает sequence gap и точный <code>lost_count</code>, но не вытесненные данные.</p></div>
+          <div class="limit"><span>09</span><p><strong>Timeout 10…1000 мс.</strong> По умолчанию 100 мс; отсчёт начинается после фактической передачи CAN-запроса.</p></div>
+          <div class="limit"><span>10</span><p><strong>Нет автоматических повторов.</strong> После timeout, abort или driver error решение о retry принимает клиент.</p></div>
+          <div class="limit"><span>11</span><p><strong>Нет auth и TLS.</strong> Любой узел сети может включить или выключить Bridge и получить <code>session_id</code>. Использовать только в изолированной доверенной сети.</p></div>
+          <div class="limit"><span>12</span><p><strong>Swagger не является WS-клиентом.</strong> Он выполняет REST-запросы и показывает контракт; для WebSocket используйте приложение или библиотеку RFC 6455.</p></div>
+        </div>
+        <aside class="card callout" style="margin-top:14px"><strong>CORS.</strong><p>Прошивка не добавляет CORS-заголовки. Кнопка Try it out в Swagger работает, когда документация обслуживается с того же origin, что и API, либо когда запрос выполняется не из браузера. Для локальной диагностики надёжнее использовать curl, Python или Postman.</p></aside>
+      </div>
+    </section>
+
+    <section id="swagger" aria-labelledby="swagger-title">
+      <div class="shell">
+        <div class="section-head">
+          <div class="eyebrow">07 · OpenAPI 3.1</div>
+          <div><h2 id="swagger-title">REST API в Swagger UI</h2><p>Примеры запросов и ответов встроены в контракт. Адрес по умолчанию — <code>http://192.168.1.7</code>; его можно заменить в поле Servers.</p></div>
+        </div>
+        <div class="swagger-shell">
+          <div class="swagger-toolbar"><span>Swagger UI загружается с CDN; остальная документация полностью доступна без него.</span><button id="download-openapi" class="button secondary" type="button">Скачать OpenAPI JSON</button></div>
+          <div id="swagger-ui"><div class="swagger-placeholder">Загрузка интерактивной спецификации…</div></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer"><div class="shell"><span>CanSniff · CAN Bridge API v1</span><span>Контракт сверён с реализацией <code>api_server.c</code> и <code>can_bridge.c</code></span></div></footer>
+
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    const bridgeStatusExample = {
+      active: true, connected: true, session_id: 123456789,
+      lease_remaining_ms: 9421, request_pending: false, pending_count: 0,
+      client_request_id: 41, tx_sequence: 27, requests: 41, completed: 40,
+      aborted: 1, timeouts: 0, rejected: 0, unsolicited_frames: 318,
+      last_result: "completed", result_generation: 41
+    };
+
+    const openapi = {
+      openapi: "3.1.0",
+      info: {
+        title: "CanSniff CAN Bridge API",
+        version: "1.0.0",
+        description: "REST-часть CAN–Ethernet Bridge v1. Управляет сессией, после чего обмен SDO и поток CAN идут через WebSocket. Авторизация в v1 отсутствует."
+      },
+      servers: [{ url: "http://192.168.1.7", description: "CanSniff (адрес по умолчанию)" }],
+      tags: [{ name: "Bridge", description: "Жизненный цикл CAN Bridge" }],
+      paths: {
+        "/api/v1/bridge/status": {
+          get: {
+            tags: ["Bridge"], summary: "Получить состояние Bridge", operationId: "getBridgeStatus",
+            description: "Возвращает активность сессии, остаток lease, состояние ожидающих SDO и накопительные счётчики.",
+            responses: {
+              "200": { description: "Текущее состояние", content: { "application/json": { schema: { $ref: "#/components/schemas/BridgeStatus" }, examples: { active: { summary: "Активная сессия", value: bridgeStatusExample }, idle: { summary: "Bridge выключен", value: { ...bridgeStatusExample, active: false, connected: false, session_id: 0, lease_remaining_ms: 0, requests: 0, completed: 0, aborted: 0, unsolicited_frames: 0, last_result: "none", result_generation: 0 } } } } } }
+            }
+          }
+        },
+        "/api/v1/bridge/enable": {
+          post: {
+            tags: ["Bridge"], summary: "Включить Bridge", operationId: "enableBridge",
+            description: "Идемпотентная операция. Если Bridge уже активен, возвращает его текущий session_id. Для новой сессии CAN должен быть синхронизирован, обычная TX-очередь — пуста, periodic TX — выключен.",
+            responses: {
+              "202": { description: "Bridge включён или уже был включён", content: { "application/json": { schema: { $ref: "#/components/schemas/BridgeStatus" }, example: { ...bridgeStatusExample, connected: false, lease_remaining_ms: 10000, requests: 0, completed: 0, aborted: 0, unsolicited_frames: 0, last_result: "none", result_generation: 0 } } } },
+              "409": { description: "CAN не готов или TX занят", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" }, example: { error: "bridge_can_busy", message: "CAN must be synchronized and the normal transmit queue must be idle" } } } }
+            }
+          }
+        },
+        "/api/v1/bridge/disable": {
+          post: {
+            tags: ["Bridge"], summary: "Выключить Bridge", operationId: "disableBridge",
+            description: "Отменяет ожидающие транзакции, закрывает сессию, освобождает эксклюзивный TX и принудительно переводит CAN в SILENT. Операция идемпотентна.",
+            responses: {
+              "202": { description: "Bridge выключен", content: { "application/json": { schema: { $ref: "#/components/schemas/BridgeStatus" }, example: { active: false, connected: false, session_id: 0, lease_remaining_ms: 0, request_pending: false, pending_count: 0, client_request_id: 41, tx_sequence: 27, requests: 41, completed: 40, aborted: 1, timeouts: 0, rejected: 0, unsolicited_frames: 318, last_result: "completed", result_generation: 41 } } } }
+            }
+          }
+        },
+        "/api/v1/bridge": {
+          get: {
+            tags: ["Bridge"], summary: "Открыть WebSocket Bridge", operationId: "openBridgeWebSocket",
+            description: "RFC 6455 upgrade. Swagger UI показывает handshake, но не поддерживает двунаправленный обмен. После HTTP 101 сервер отправляет hello. Клиент отправляет masked, unfragmented текстовые JSON-кадры до 512 байт.\n\nПример SDO read:\n```json\n{\"type\":\"sdo\",\"request_id\":1,\"node_id\":7,\"command\":\"read\",\"index\":24584,\"subindex\":0,\"timeout_ms\":150}\n```\n\nПример SDO write_u16:\n```json\n{\"type\":\"sdo\",\"request_id\":2,\"node_id\":7,\"command\":\"write_u16\",\"index\":8192,\"subindex\":1,\"value\":4660,\"timeout_ms\":100}\n```",
+            parameters: [{ name: "session_id", in: "query", required: true, description: "Значение из POST /enable", schema: { type: "integer", minimum: 1, maximum: 4294967295 }, example: 123456789 }],
+            responses: {
+              "101": { description: "Switching Protocols. Дальнейшие сообщения описаны схемами HelloMessage, SdoRequest, AckMessage, ResultMessage и CSWS." },
+              "400": { description: "Некорректный WebSocket upgrade", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" }, example: { error: "bad_websocket_upgrade", message: "RFC 6455 WebSocket upgrade is required" } } } },
+              "409": { description: "Сессия неверна, выключена, просрочена или уже подключена", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" }, example: { error: "bridge_unavailable", message: "Bridge session is invalid, disabled, or already connected" } } } }
+            }
+          }
+        }
+      },
+      components: {
+        schemas: {
+          BridgeStatus: {
+            type: "object", required: ["active", "connected", "session_id", "lease_remaining_ms", "request_pending", "pending_count", "requests", "completed", "aborted", "timeouts", "rejected", "unsolicited_frames", "last_result", "result_generation"],
+            properties: {
+              active: { type: "boolean", description: "Bridge включён" }, connected: { type: "boolean", description: "WebSocket присоединён" },
+              session_id: { type: "integer", minimum: 0, maximum: 4294967295 }, lease_remaining_ms: { type: "integer", minimum: 0, maximum: 10000 },
+              request_pending: { type: "boolean" }, pending_count: { type: "integer", minimum: 0 }, client_request_id: { type: "integer", minimum: 0, maximum: 4294967295 }, tx_sequence: { type: "integer", minimum: 0, maximum: 4294967295 },
+              requests: { type: "integer", minimum: 0 }, completed: { type: "integer", minimum: 0 }, aborted: { type: "integer", minimum: 0 }, timeouts: { type: "integer", minimum: 0 }, rejected: { type: "integer", minimum: 0 }, unsolicited_frames: { type: "integer", minimum: 0 },
+              last_result: { $ref: "#/components/schemas/ResultStatus" }, result_generation: { type: "integer", minimum: 0, maximum: 4294967295 }
+            }, example: bridgeStatusExample
+          },
+          Error: { type: "object", required: ["error", "message"], properties: { error: { type: "string" }, message: { type: "string" } } },
+          ResultStatus: { type: "string", enum: ["none", "completed", "abort", "timeout", "bus_off", "driver_error", "cancelled", "protocol_error"] },
+          SdoCommand: { type: "string", enum: ["read", "write_u8", "write_u16", "write_u24", "write_u32"] },
+          HelloMessage: { type: "object", required: ["type", "protocol", "mode", "session_id", "lease_ms", "sequence"], properties: { type: { const: "hello" }, protocol: { const: 1 }, mode: { const: "bridge" }, session_id: { type: "integer" }, lease_ms: { const: 10000 }, sequence: { type: "integer" } }, example: { type: "hello", protocol: 1, mode: "bridge", session_id: 123456789, lease_ms: 10000, sequence: 456 } },
+          SdoRequest: { type: "object", required: ["type", "request_id", "node_id", "command", "index", "subindex"], properties: { type: { const: "sdo" }, request_id: { type: "integer", minimum: 1, maximum: 4294967295 }, node_id: { type: "integer", minimum: 1, maximum: 127 }, command: { $ref: "#/components/schemas/SdoCommand" }, index: { type: "integer", minimum: 0, maximum: 65535 }, subindex: { type: "integer", minimum: 0, maximum: 255 }, value: { type: "integer", minimum: 0, maximum: 4294967295, description: "Обязательно для write_*; значение должно помещаться в ширину команды, иначе запрос получит invalid_request" }, timeout_ms: { type: "integer", minimum: 10, maximum: 1000, default: 100 } }, examples: [{ type: "sdo", request_id: 1, node_id: 7, command: "read", index: 24584, subindex: 0, timeout_ms: 150 }, { type: "sdo", request_id: 2, node_id: 7, command: "write_u16", index: 8192, subindex: 1, value: 4660, timeout_ms: 100 }] },
+          AckMessage: { type: "object", required: ["type", "request_id", "tx_sequence", "status"], properties: { type: { const: "ack" }, request_id: { type: "integer" }, tx_sequence: { type: "integer" }, status: { type: "string", enum: ["accepted", "duplicate", "request_pending", "invalid_request", "can_not_ready", "bridge_disabled", "not_connected"] } }, example: { type: "ack", request_id: 1, tx_sequence: 27, status: "accepted" } },
+          ResultMessage: { type: "object", required: ["type", "request_id", "tx_sequence", "status", "timestamp_us", "capture_time_us", "abort_code", "has_response", "can_id", "dlc", "data"], properties: { type: { const: "result" }, request_id: { type: "integer" }, tx_sequence: { type: "integer" }, status: { $ref: "#/components/schemas/ResultStatus" }, timestamp_us: { type: "integer", description: "Младшая совместимая метка времени" }, capture_time_us: { type: "integer", description: "Непрерывная u64 метка от запуска" }, abort_code: { type: "integer", description: "CANopen SDO Abort code при status=abort" }, has_response: { type: "boolean" }, can_id: { type: "integer" }, dlc: { type: "integer", minimum: 0, maximum: 8 }, data: { type: "string", pattern: "^[0-9A-F]{16}$", description: "Всегда 8 байт uppercase hex; проверяйте has_response и dlc" } }, example: { type: "result", request_id: 1, tx_sequence: 27, status: "completed", timestamp_us: 1234567, capture_time_us: 1234567, abort_code: 0, has_response: true, can_id: 1415, dlc: 8, data: "4308600078563412" } }
+        }
+      }
+    };
+
+    document.querySelectorAll("[data-code-tabs]").forEach((tabs) => {
+      tabs.querySelectorAll("[data-code-tab]").forEach((button) => button.addEventListener("click", () => {
+        tabs.querySelectorAll("[data-code-tab]").forEach((item) => item.setAttribute("aria-selected", String(item === button)));
+        tabs.querySelectorAll("[data-code-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.codePanel === button.dataset.codeTab));
+      }));
+    });
+
+    document.getElementById("download-openapi").addEventListener("click", () => {
+      const blob = new Blob([JSON.stringify(openapi, null, 2)], { type: "application/json" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "can-bridge-openapi-v1.json";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    });
+
+    if (typeof SwaggerUIBundle === "function") {
+      SwaggerUIBundle({
+        spec: openapi,
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        displayRequestDuration: true,
+        defaultModelsExpandDepth: 1,
+        defaultModelExpandDepth: 2,
+        docExpansion: "list",
+        filter: true,
+        tryItOutEnabled: false,
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+        layout: "BaseLayout"
+      });
+    } else {
+      document.getElementById("swagger-ui").innerHTML = '<div class="swagger-placeholder"><strong>Swagger UI недоступен.</strong><br>Проверьте доступ к unpkg.com или скачайте OpenAPI JSON кнопкой выше. Основное описание и примеры доступны без сети.</div>';
+    }
+  </script>
+</body>
+</html>
