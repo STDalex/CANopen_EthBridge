@@ -111,6 +111,12 @@ h2 { font-size: 17px; margin: 2px 0 0; }
 .storage-grid article { display: grid; gap: 5px; padding: 14px; min-width: 0; background: linear-gradient(145deg, #141f2a, #101821); border: 1px solid var(--line); border-radius: 12px; }
 .storage-grid span, .storage-grid small { color: var(--muted); font-size: 10px; }
 .storage-grid strong { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.logger-panel { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(160px, .65fr) minmax(240px, 1fr) auto; align-items: end; gap: 16px; padding: 15px 18px; margin-bottom: 12px; }
+.logger-summary { display: grid; align-self: stretch; align-content: space-between; gap: 9px; }
+.logger-summary h2 { margin: 2px 0 0; }
+.logger-panel label { min-width: 0; }
+.logger-panel .record-actions { flex-wrap: nowrap; align-items: center; }
+.logger-panel .record-actions button { white-space: nowrap; }
 .log-list { min-height: 220px; }
 .log-row { display: grid; grid-template-columns: 1fr 130px 110px; gap: 14px; align-items: center; padding: 12px 18px; border-bottom: 1px solid var(--line); }
 .log-row code { color: #c6d5df; }
@@ -119,7 +125,7 @@ h2 { font-size: 17px; margin: 2px 0 0; }
 .log-pagination button:disabled { opacity: .4; cursor: default; }
 .log-page-picker { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
 .log-page-picker select { width: auto; min-width: 92px; height: 36px; padding: 0 28px 0 10px; }
-.settings-grid { display: grid; grid-template-columns: 1.25fr .75fr .75fr; gap: 12px; align-items: start; }
+.settings-grid { display: grid; grid-template-columns: 1.25fr .75fr; gap: 12px; align-items: start; }
 .form-card { padding: 18px; display: grid; gap: 16px; }
 .form-card > .form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
 .check { grid-template-columns: 18px 1fr; align-items: center; }
@@ -178,6 +184,8 @@ h2 { font-size: 17px; margin: 2px 0 0; }
   .node-detail { min-height: 400px; }
   .detail-metrics { grid-template-columns: repeat(2, 1fr); }
   .storage-grid { grid-template-columns: repeat(3, 1fr); }
+  .logger-panel { grid-template-columns: minmax(180px, .8fr) minmax(160px, .65fr) minmax(240px, 1fr); }
+  .logger-panel .record-actions { grid-column: 1 / -1; justify-content: flex-end; }
 }
 
 @media (max-width: 700px) {
@@ -202,6 +210,8 @@ h2 { font-size: 17px; margin: 2px 0 0; }
   .tx-fields { grid-template-columns: 1fr !important; }
   .tx-data-field { grid-column: auto; }
   .storage-grid { grid-template-columns: repeat(2, 1fr); }
+  .logger-panel { grid-template-columns: 1fr; align-items: stretch; }
+  .logger-panel .record-actions { grid-column: auto; justify-content: flex-start; flex-wrap: wrap; }
   .log-row { grid-template-columns: 1fr auto; }
   .log-row span { display: none; }
 }

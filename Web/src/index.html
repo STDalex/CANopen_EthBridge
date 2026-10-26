@@ -68,6 +68,15 @@
 
     <section id="tab-logs" class="tab">
       <div id="storage-detail" class="storage-grid" aria-label="Состояние microSD"></div>
+      <form id="logger-form" class="panel logger-panel">
+        <div class="logger-summary">
+          <div><span class="eyebrow">Logger</span><h2>Запись</h2></div>
+          <div id="logger-status" class="logger-status"><span class="dot"></span><span>Запись остановлена</span></div>
+        </div>
+        <label>Режим<select id="logger-mode"><option value="full">Все кадры</option><option value="selected">Выбранные ноды</option></select></label>
+        <label>Ноды через запятую<input id="logger-nodes" placeholder="1, 7, 42"></label>
+        <div class="record-actions"><button type="submit" class="secondary">Сохранить</button><button id="start-recording" type="button">Начать запись</button><button id="stop-recording" type="button" class="danger">Остановить</button></div>
+      </form>
       <div class="panel">
         <div class="section-title"><div><span class="eyebrow">microSD</span><h2>Завершённые логи</h2></div><button id="refresh-logs" class="secondary">Обновить</button></div>
         <div id="log-list" class="log-list empty-state">Список логов ещё не загружен</div>
@@ -147,14 +156,6 @@
           <label>Скорость<select id="can-bitrate"><option value="0">Авто</option><option>10</option><option>20</option><option>50</option><option>100</option><option>125</option><option>250</option><option>500</option><option>800</option><option>1000</option></select></label>
           <label class="check"><input id="deep-sdo" type="checkbox"><span>Глубокий анализ SDO</span></label>
           <button type="submit">Сохранить CAN</button>
-        </form>
-        <form id="logger-form" class="panel form-card">
-          <div><span class="eyebrow">Logger</span><h2>Запись</h2></div>
-          <div id="logger-status" class="logger-status"><span class="dot"></span><span>Запись остановлена</span></div>
-          <label>Режим<select id="logger-mode"><option value="full">Все кадры</option><option value="selected">Выбранные ноды</option></select></label>
-          <label>Ноды через запятую<input id="logger-nodes" placeholder="1, 7, 42"></label>
-          <p class="hint">В режиме «Выбранные ноды» сохраняются кадры отмеченных нод.</p>
-          <div class="record-actions"><button type="submit" class="secondary">Сохранить настройки</button><button id="start-recording" type="button">Начать запись</button><button id="stop-recording" type="button" class="danger">Остановить</button></div>
         </form>
       </div>
     </section>
