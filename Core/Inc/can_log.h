@@ -37,7 +37,21 @@ typedef struct
   uint32_t write_errors;
   uint32_t recovery_count;
   uint32_t selected_node_count;
+  uint32_t buffered_blocks;
   int32_t last_error;
+  uint32_t sd_io_errors;
+  uint32_t sd_retries;
+  uint32_t sd_last_error_tick;
+  uint32_t sd_last_sector;
+  uint32_t sd_last_count;
+  uint32_t sd_last_hal_error;
+  uint32_t sd_last_status;
+  uint32_t sd_max_read_ms;
+  uint32_t sd_max_write_ms;
+  uint8_t sd_last_operation;
+  uint8_t sd_last_hal_status;
+  uint8_t sd_last_handle_state;
+  uint8_t reserved;
 } CanLogStatus;
 
 #define CAN_LOG_LIST_MAX 32U
@@ -46,6 +60,7 @@ typedef struct
 {
   char path[72];
   uint32_t session_id;
+  uint32_t file_index;
   uint64_t size_bytes;
 } CanLogFileInfo;
 
@@ -75,8 +90,11 @@ void CanLogger_SetNodeSelected(uint8_t node_id, bool selected);
 bool CanLogger_IsNodeSelected(uint8_t node_id);
 void CanLogger_ClearSelectedNodes(void);
 void CanLogger_GetStatus(CanLogStatus *status);
-bool CanLogger_GetLogList(CanLogFileInfo *files, uint32_t capacity,
-                          uint32_t *count, uint32_t timeout_ms);
+bool CanLogger_GetLogListPage(CanLogFileInfo *files, uint32_t capacity,
+                              uint32_t before_session_id,
+                              uint32_t before_file_index,
+                              uint32_t *count, uint32_t *total,
+                              bool *has_more, uint32_t timeout_ms);
 CanLogDownloadResult CanLogger_DownloadBegin(CanLogDownload *download,
                                              const char *path,
                                              uint32_t timeout_ms);

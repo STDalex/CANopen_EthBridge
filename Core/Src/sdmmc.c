@@ -1,10 +1,39 @@
 #include "sdmmc.h"
 
+#define SD_DETECT_DEBOUNCE_MS 50U
+
 SD_HandleTypeDef hsd1;
+DMA_HandleTypeDef hdma_sdmmc1_rx;
+DMA_HandleTypeDef hdma_sdmmc1_tx;
 
 bool StorageSd_CardPresent(void)
 {
-  return HAL_GPIO_ReadPin(SD_DETECT_GPIO_Port, SD_DETECT_Pin) == GPIO_PIN_RESET;
+  static bool initialized;
+  static bool stable_present;
+  static bool sampled_present;
+  static uint32_t changed_tick;
+  bool present = HAL_GPIO_ReadPin(SD_DETECT_GPIO_Port,
+                                 SD_DETECT_Pin) == GPIO_PIN_RESET;
+  uint32_t now = HAL_GetTick();
+
+  if (!initialized)
+  {
+    initialized = true;
+    stable_present = present;
+    sampled_present = present;
+    changed_tick = now;
+  }
+  else if (present != sampled_present)
+  {
+    sampled_present = present;
+    changed_tick = now;
+  }
+  else if ((present != stable_present) &&
+           ((uint32_t)(now - changed_tick) >= SD_DETECT_DEBOUNCE_MS))
+  {
+    stable_present = present;
+  }
+  return stable_present;
 }
 
 HAL_StatusTypeDef StorageSd_Init(void)
@@ -52,6 +81,7 @@ void HAL_SD_MspInit(SD_HandleTypeDef *sdHandle)
   }
 
   __HAL_RCC_SDMMC1_CLK_ENABLE();
+  __HAL_RCC_DMA2_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
@@ -64,6 +94,53 @@ void HAL_SD_MspInit(SD_HandleTypeDef *sdHandle)
 
   gpio.Pin = GPIO_PIN_2;
   HAL_GPIO_Init(GPIOD, &gpio);
+
+  hdma_sdmmc1_rx.Instance = DMA2_Stream3;
+  hdma_sdmmc1_rx.Init.Channel = DMA_CHANNEL_4;
+  hdma_sdmmc1_rx.Init.Direction = DMA_PERIPH_TO_MEMORY;
+  hdma_sdmmc1_rx.Init.PeriphInc = DMA_PINC_DISABLE;
+  hdma_sdmmc1_rx.Init.MemInc = DMA_MINC_ENABLE;
+  hdma_sdmmc1_rx.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
+  hdma_sdmmc1_rx.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
+  hdma_sdmmc1_rx.Init.Mode = DMA_PFCTRL;
+  hdma_sdmmc1_rx.Init.Priority = DMA_PRIORITY_VERY_HIGH;
+  hdma_sdmmc1_rx.Init.FIFOMode = DMA_FIFOMODE_ENABLE;
+  hdma_sdmmc1_rx.Init.FIFOThreshold = DMA_FIFO_THRESHOLD_FULL;
+  hdma_sdmmc1_rx.Init.MemBurst = DMA_MBURST_INC4;
+  hdma_sdmmc1_rx.Init.PeriphBurst = DMA_PBURST_INC4;
+  if (HAL_DMA_Init(&hdma_sdmmc1_rx) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  __HAL_LINKDMA(sdHandle, hdmarx, hdma_sdmmc1_rx);
+
+  hdma_sdmmc1_tx.Instance = DMA2_Stream6;
+  hdma_sdmmc1_tx.Init.Channel = DMA_CHANNEL_4;
+  hdma_sdmmc1_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
+  hdma_sdmmc1_tx.Init.PeriphInc = DMA_PINC_DISABLE;
+  hdma_sdmmc1_tx.Init.MemInc = DMA_MINC_ENABLE;
+  hdma_sdmmc1_tx.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;
+  hdma_sdmmc1_tx.Init.MemDataAlignment = DMA_MDATAALIGN_WORD;
+  hdma_sdmmc1_tx.Init.Mode = DMA_PFCTRL;
+  hdma_sdmmc1_tx.Init.Priority = DMA_PRIORITY_VERY_HIGH;
+  hdma_sdmmc1_tx.Init.FIFOMode = DMA_FIFOMODE_ENABLE;
+  hdma_sdmmc1_tx.Init.FIFOThreshold = DMA_FIFO_THRESHOLD_FULL;
+  hdma_sdmmc1_tx.Init.MemBurst = DMA_MBURST_INC4;
+  hdma_sdmmc1_tx.Init.PeriphBurst = DMA_PBURST_INC4;
+  if (HAL_DMA_Init(&hdma_sdmmc1_tx) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  __HAL_LINKDMA(sdHandle, hdmatx, hdma_sdmmc1_tx);
+
+  /* DMA completion must pre-empt SDMMC DATAEND handling. Both priorities are
+     valid for FreeRTOS FromISR APIs used by the disk I/O completion signal. */
+  HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 5U, 0U);
+  HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
+  HAL_NVIC_SetPriority(DMA2_Stream6_IRQn, 5U, 0U);
+  HAL_NVIC_EnableIRQ(DMA2_Stream6_IRQn);
+  HAL_NVIC_SetPriority(SDMMC1_IRQn, 6U, 0U);
+  HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
 }
 
 void HAL_SD_MspDeInit(SD_HandleTypeDef *sdHandle)
@@ -73,6 +150,11 @@ void HAL_SD_MspDeInit(SD_HandleTypeDef *sdHandle)
     return;
   }
 
+  HAL_NVIC_DisableIRQ(SDMMC1_IRQn);
+  HAL_NVIC_DisableIRQ(DMA2_Stream3_IRQn);
+  HAL_NVIC_DisableIRQ(DMA2_Stream6_IRQn);
+  (void)HAL_DMA_DeInit(&hdma_sdmmc1_rx);
+  (void)HAL_DMA_DeInit(&hdma_sdmmc1_tx);
   __HAL_RCC_SDMMC1_CLK_DISABLE();
   HAL_GPIO_DeInit(GPIOC, GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10 |
                          GPIO_PIN_11 | GPIO_PIN_12);

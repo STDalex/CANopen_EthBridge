@@ -2185,7 +2185,13 @@ static void WriteLoggerConfig(struct netconn *connection, const char *status)
     "\"file_size_bytes\":%llu,\"free_bytes\":%llu,"
     "\"stored_frames\":%llu,\"dropped_frames\":%llu,"
     "\"write_errors\":%lu,\"recoveries\":%lu,\"last_error\":%ld,"
-    "\"selected_node_count\":%lu,"
+    "\"selected_node_count\":%lu,\"buffered_blocks\":%lu,"
+    "\"sd_io\":{\"errors\":%lu,\"retries\":%lu,"
+    "\"last_error_tick\":%lu,\"last_sector\":%lu,\"last_count\":%lu,"
+    "\"last_hal_error\":%lu,\"last_sd_status\":%lu,"
+    "\"max_read_ms\":%lu,\"max_write_ms\":%lu,"
+    "\"last_operation\":%u,\"last_hal_status\":%u,"
+    "\"last_handle_state\":%u},"
     "\"selected_nodes\":[",
     LoggerModeName(logger_configured_mode),
     logger.mode != CAN_LOG_MODE_OFF ? "true" : "false",
@@ -2195,7 +2201,19 @@ static void WriteLoggerConfig(struct netconn *connection, const char *status)
     (unsigned long long)logger.stored_frames,
     (unsigned long long)logger.dropped_frames,
     (unsigned long)logger.write_errors, (unsigned long)logger.recovery_count,
-    (long)logger.last_error, (unsigned long)logger.selected_node_count);
+    (long)logger.last_error, (unsigned long)logger.selected_node_count,
+    (unsigned long)logger.buffered_blocks,
+    (unsigned long)logger.sd_io_errors, (unsigned long)logger.sd_retries,
+    (unsigned long)logger.sd_last_error_tick,
+    (unsigned long)logger.sd_last_sector,
+    (unsigned long)logger.sd_last_count,
+    (unsigned long)logger.sd_last_hal_error,
+    (unsigned long)logger.sd_last_status,
+    (unsigned long)logger.sd_max_read_ms,
+    (unsigned long)logger.sd_max_write_ms,
+    (unsigned int)logger.sd_last_operation,
+    (unsigned int)logger.sd_last_hal_status,
+    (unsigned int)logger.sd_last_handle_state);
   for (node_id = 1U; node_id <= CANOPEN_NODE_COUNT_MAX; ++node_id)
   {
     if (CanLogger_IsNodeSelected((uint8_t)node_id))
@@ -2363,7 +2381,9 @@ static void HandleStatistics(struct netconn *connection)
   WriterPrintf(&writer,
     "\"analyzer\":{\"frames\":%lu,\"unique_nodes\":%lu,\"queue_overflows\":%lu},"
     "\"logger\":{\"stored_frames\":%llu,\"dropped_frames\":%llu,"
-    "\"write_errors\":%lu,\"recoveries\":%lu},"
+    "\"write_errors\":%lu,\"recoveries\":%lu,\"buffered_blocks\":%lu,"
+    "\"sd_io_errors\":%lu,\"sd_retries\":%lu,"
+    "\"sd_max_write_ms\":%lu},"
     "\"tx\":{\"queued\":%lu,\"sent\":%lu,\"cancelled\":%lu,"
     "\"timeouts\":%lu,\"arbitration_lost\":%lu,\"bus_off\":%lu,"
     "\"errors\":%lu},"
@@ -2376,6 +2396,9 @@ static void HandleStatistics(struct netconn *connection)
     (unsigned long long)logger.stored_frames,
     (unsigned long long)logger.dropped_frames,
     (unsigned long)logger.write_errors, (unsigned long)logger.recovery_count,
+    (unsigned long)logger.buffered_blocks,
+    (unsigned long)logger.sd_io_errors, (unsigned long)logger.sd_retries,
+    (unsigned long)logger.sd_max_write_ms,
     (unsigned long)tx.queued, (unsigned long)tx.sent,
     (unsigned long)tx.cancelled, (unsigned long)tx.timeouts,
     (unsigned long)tx.arbitration_lost, (unsigned long)tx.bus_off,
@@ -2516,21 +2539,58 @@ static void HandleNodeEvents(struct netconn *connection, uint8_t node_id,
   WriterEnd(&writer);
 }
 
-static void HandleLogs(struct netconn *connection)
+static void HandleLogs(struct netconn *connection, const char *query)
 {
   JsonWriter writer;
   uint32_t count = 0U;
+  uint32_t total = 0U;
+  uint32_t limit = QueryUnsigned(query, "limit", CAN_LOG_LIST_MAX,
+                                 CAN_LOG_LIST_MAX);
+  uint32_t before_session_id = QueryUnsigned(query, "before_session", 0U,
+                                             999999U);
+  uint32_t before_file_index = QueryUnsigned(query, "before_file", 0U,
+                                             999999U);
+  bool has_more = false;
   uint32_t index;
 
-  if (!CanLogger_GetLogList(log_snapshot, CAN_LOG_LIST_MAX, &count, 2000U))
+  if (limit == 0U)
+  {
+    limit = 1U;
+  }
+  if ((before_session_id == 0U) || (before_file_index == 0U))
+  {
+    before_session_id = 0U;
+    before_file_index = 0U;
+  }
+  if (!CanLogger_GetLogListPage(log_snapshot, limit, before_session_id,
+                                before_file_index, &count, &total,
+                                &has_more, 5000U))
   {
     SendError(connection, "503 Service Unavailable", "storage_unavailable",
               "Completed log list is not available");
     return;
   }
   WriterBegin(&writer, connection, "200 OK");
-  WriterPrintf(&writer, "{\"count\":%lu,\"truncated\":%s,\"items\":[",
-               (unsigned long)count, count == CAN_LOG_LIST_MAX ? "true" : "false");
+  WriterPrintf(&writer,
+               "{\"count\":%lu,\"total\":%lu,\"limit\":%lu,"
+               "\"order\":\"newest_first\",\"has_more\":%s,"
+               "\"truncated\":%s,"
+               "\"next_cursor\":",
+               (unsigned long)count, (unsigned long)total,
+               (unsigned long)limit, has_more ? "true" : "false",
+               has_more ? "true" : "false");
+  if (has_more && (count > 0U))
+  {
+    const CanLogFileInfo *last = &log_snapshot[count - 1U];
+    WriterPrintf(&writer, "{\"session_id\":%lu,\"file_index\":%lu}",
+                 (unsigned long)last->session_id,
+                 (unsigned long)last->file_index);
+  }
+  else
+  {
+    WriterChunk(&writer, "null", 4U);
+  }
+  WriterChunk(&writer, ",\"items\":[", 10U);
   for (index = 0U; index < count; ++index)
   {
     static const char prefix[] = "/CANSNIFF/LOGS/";
@@ -2538,10 +2598,12 @@ static void HandleLogs(struct netconn *connection)
                                    sizeof(prefix) - 1U) == 0 ?
                            log_snapshot[index].path + sizeof(prefix) - 1U : "";
     WriterPrintf(&writer,
-      "%s{\"path\":\"%s\",\"session_id\":%lu,\"size_bytes\":%llu,"
+      "%s{\"path\":\"%s\",\"session_id\":%lu,\"file_index\":%lu,"
+      "\"size_bytes\":%llu,"
       "\"download_url\":\"/api/v1/logs/%s\"}",
       index == 0U ? "" : ",", log_snapshot[index].path,
       (unsigned long)log_snapshot[index].session_id,
+      (unsigned long)log_snapshot[index].file_index,
       (unsigned long long)log_snapshot[index].size_bytes, relative);
   }
   WriterChunk(&writer, "]}\n", 3U);
@@ -2674,7 +2736,7 @@ static void HandleLogDownload(struct netconn *connection, const char *request,
   StatusIncrement(&public_status.download_requests);
   /* Browsers and antivirus filters may briefly pause a download while they
      choose a target or inspect the response. One second is too aggressive. */
-  netconn_set_sendtimeout(connection, 5000);
+  netconn_set_sendtimeout(connection, 30000);
   if (!ParseRangeHeader(request, &range))
   {
     SendError(connection, "400 Bad Request", "bad_range",
@@ -3022,7 +3084,7 @@ static bool Dispatch(struct netconn *connection, char *request)
            ParseNodePath(path, "/objects", &node_id))
     HandleNodeEvents(connection, node_id, true, query);
   else if ((strcmp(method, "GET") == 0) && (strcmp(path, "/api/v1/logs") == 0))
-    HandleLogs(connection);
+    HandleLogs(connection, query);
   else if ((strcmp(method, "GET") == 0) &&
            ParseLogDownloadPath(path, log_path, log_filename))
     HandleLogDownload(connection, request, log_path, log_filename, true);

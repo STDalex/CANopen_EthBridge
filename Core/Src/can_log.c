@@ -26,7 +26,7 @@
 #define CAN_LOG_PARTIAL_FLUSH_MS      1000U
 #define CAN_LOG_SYNC_INTERVAL_MS      2000U
 #define CAN_LOG_SPACE_UPDATE_MS       5000U
-#define CAN_LOG_MOUNT_RETRY_MS        1000U
+#define CAN_LOG_MOUNT_RETRY_MS        250U
 #define CAN_LOG_QUEUE_LENGTH          (CAN_LOG_BLOCK_COUNT + 8U)
 #define CAN_LOG_INVALID_BLOCK         0xFFU
 #define CAN_LOG_ROOT                  "0:/CANSNIFF"
@@ -125,6 +125,8 @@ static CanLogFileInfo *const request_files =
 static volatile uint32_t request_sequence;
 static volatile uint32_t response_sequence;
 static volatile uint32_t response_count;
+static volatile uint32_t response_total;
+static volatile bool response_has_more;
 static volatile uint64_t response_size;
 static volatile int32_t response_error;
 static volatile bool response_success;
@@ -169,6 +171,8 @@ static uint32_t storage_session_write_errors_base;
 static uint32_t storage_last_sync_tick;
 static uint32_t storage_last_space_tick;
 static uint32_t storage_last_mount_tick;
+static bool storage_pending_block_valid;
+static CanLogQueueItem storage_pending_block;
 
 static bool CaptureReadyForLogging(const CanCaptureStatus *status)
 {
@@ -397,6 +401,8 @@ void CanLogger_Init(void)
   request_sequence = 0U;
   response_sequence = 0U;
   response_count = 0U;
+  response_total = 0U;
+  response_has_more = false;
   response_size = 0U;
   response_error = 0;
   response_success = false;
@@ -437,17 +443,23 @@ static bool ExecuteStorageRequest(CanLogRequest *request, uint32_t timeout_ms)
   }
 }
 
-bool CanLogger_GetLogList(CanLogFileInfo *files, uint32_t capacity,
-                          uint32_t *count, uint32_t timeout_ms)
+bool CanLogger_GetLogListPage(CanLogFileInfo *files, uint32_t capacity,
+                              uint32_t before_session_id,
+                              uint32_t before_file_index,
+                              uint32_t *count, uint32_t *total,
+                              bool *has_more, uint32_t timeout_ms)
 {
   CanLogRequest request = {0};
   bool success = false;
 
-  if ((files == NULL) || (count == NULL) || (capacity == 0U))
+  if ((files == NULL) || (count == NULL) || (total == NULL) ||
+      (has_more == NULL) || (capacity == 0U))
   {
     return false;
   }
   *count = 0U;
+  *total = 0U;
+  *has_more = false;
   if (capacity > CAN_LOG_LIST_MAX)
   {
     capacity = CAN_LOG_LIST_MAX;
@@ -457,6 +469,9 @@ bool CanLogger_GetLogList(CanLogFileInfo *files, uint32_t capacity,
     return false;
   }
   request.type = CAN_LOG_REQUEST_LIST;
+  request.length = capacity;
+  request.offset = ((uint64_t)before_session_id << 32U) |
+                   (uint64_t)before_file_index;
   if (ExecuteStorageRequest(&request, timeout_ms))
   {
     uint32_t available = response_count;
@@ -466,6 +481,8 @@ bool CanLogger_GetLogList(CanLogFileInfo *files, uint32_t capacity,
     }
     memcpy(files, request_files, available * sizeof(files[0]));
     *count = available;
+    *total = response_total;
+    *has_more = response_has_more;
     success = response_success;
   }
   (void)xSemaphoreGive(request_mutex);
@@ -774,6 +791,7 @@ void CanLogger_ClearSelectedNodes(void)
 
 void CanLogger_GetStatus(CanLogStatus *status)
 {
+  StorageSdDiagnostics diagnostics;
   if (status == NULL)
   {
     return;
@@ -781,10 +799,26 @@ void CanLogger_GetStatus(CanLogStatus *status)
   taskENTER_CRITICAL();
   *status = public_status;
   taskEXIT_CRITICAL();
+  StorageSd_GetDiagnostics(&diagnostics);
+  status->buffered_blocks = CAN_LOG_BLOCK_COUNT -
+                            (uint32_t)uxQueueMessagesWaiting(free_queue);
+  status->sd_io_errors = diagnostics.error_count;
+  status->sd_retries = diagnostics.retry_count;
+  status->sd_last_error_tick = diagnostics.last_error_tick;
+  status->sd_last_sector = diagnostics.last_sector;
+  status->sd_last_count = diagnostics.last_count;
+  status->sd_last_hal_error = diagnostics.last_hal_error;
+  status->sd_last_status = diagnostics.last_sdmmc_status;
+  status->sd_max_read_ms = diagnostics.max_read_ms;
+  status->sd_max_write_ms = diagnostics.max_write_ms;
+  status->sd_last_operation = diagnostics.last_operation;
+  status->sd_last_hal_status = diagnostics.last_hal_status;
+  status->sd_last_handle_state = diagnostics.last_handle_state;
 }
 
 void CanLogger_ResetCounters(void)
 {
+  bool reset_sd = false;
   taskENTER_CRITICAL();
   if (requested_mode == CAN_LOG_MODE_OFF)
   {
@@ -793,8 +827,13 @@ void CanLogger_ResetCounters(void)
     public_status.write_errors = 0U;
     public_status.recovery_count = 0U;
     public_status.last_error = 0;
+    reset_sd = true;
   }
   taskEXIT_CRITICAL();
+  if (reset_sd)
+  {
+    StorageSd_ResetDiagnostics();
+  }
 }
 
 const char *CanLogger_ModeName(CanLogMode mode)
@@ -826,8 +865,23 @@ static void StorageSetState(CanLogCardState state, int32_t error)
 {
   taskENTER_CRITICAL();
   public_status.card_state = state;
-  public_status.last_error = error;
+  /* Keep the last real error visible after a successful remount.  It is
+     cleared explicitly together with the counters, not by transient
+     Mounting/Ready/Recording state changes. */
+  if (error != 0)
+  {
+    public_status.last_error = error;
+  }
   taskEXIT_CRITICAL();
+}
+
+static bool StorageStopRequested(void)
+{
+  bool stopped;
+  taskENTER_CRITICAL();
+  stopped = requested_mode == CAN_LOG_MODE_OFF;
+  taskEXIT_CRITICAL();
+  return stopped;
 }
 
 static FRESULT StorageWrite(FIL *file, const void *data, UINT length)
@@ -1689,7 +1743,6 @@ static FRESULT OpenNewLogFile(void)
                  "L%06lu.TMP", (unsigned long)storage_file_index);
   public_status.file_size_bytes = storage_file_position;
   public_status.card_state = CAN_LOG_CARD_RECORDING;
-  public_status.last_error = 0;
   taskEXIT_CRITICAL();
   return FR_OK;
 }
@@ -1883,15 +1936,27 @@ static void HandleConfigurationItem(const CanLogQueueItem *item)
   }
 }
 
-static void HandleBlockItem(uint8_t block_index, uint32_t generation)
+static bool HandleBlockItem(uint8_t block_index, uint32_t generation)
 {
   CanLogBlockMeta *meta = &block_meta[block_index];
   FRESULT result = FR_OK;
+  CanLogCardState card_state;
 
-  if (!storage_mounted || !storage_file_open ||
-      (storage_configuration.mode == CAN_LOG_MODE_OFF) ||
+  taskENTER_CRITICAL();
+  card_state = public_status.card_state;
+  taskEXIT_CRITICAL();
+
+  if ((storage_configuration.mode == CAN_LOG_MODE_OFF) ||
       (generation != storage_configuration.generation))
   {
+    StatusAddDropped(meta->frame_count);
+  }
+  else if (!storage_mounted || !storage_file_open)
+  {
+    if ((card_state != CAN_LOG_CARD_FULL) && !StorageStopRequested())
+    {
+      return false;
+    }
     StatusAddDropped(meta->frame_count);
   }
   else
@@ -1899,24 +1964,45 @@ static void HandleBlockItem(uint8_t block_index, uint32_t generation)
     result = WriteLogBlock(block_index);
     if (result != FR_OK)
     {
-      StatusAddWriteError((int32_t)result, meta->frame_count);
       if (result == FR_DENIED)
       {
+        StatusAddWriteError((int32_t)result, meta->frame_count);
         StorageSetState(CAN_LOG_CARD_FULL, (int32_t)result);
       }
       else
       {
+        /* Keep this block owned by the storage task. It will be written into
+           the next recovered session after the card is mounted again. */
+        StatusAddWriteError((int32_t)result, 0U);
         StorageUnmount(CAN_LOG_CARD_ERROR, (int32_t)result);
+        return false;
       }
     }
   }
   (void)xQueueSend(free_queue, &block_index, portMAX_DELAY);
+  return true;
 }
 
-static bool HasCompletedLogExtension(const char *name)
+static bool ParseCompletedLogFile(const char *name, uint32_t *file_index)
 {
-  const char *extension = strrchr(name, '.');
-  return (extension != NULL) && (strcmp(extension, ".CSL") == 0);
+  uint32_t value = 0U;
+  uint32_t index;
+
+  if ((name == NULL) || (file_index == NULL) || (strlen(name) != 11U) ||
+      (name[0] != 'L') || (strcmp(name + 7U, ".CSL") != 0))
+  {
+    return false;
+  }
+  for (index = 1U; index <= 6U; ++index)
+  {
+    if ((name[index] < '0') || (name[index] > '9'))
+    {
+      return false;
+    }
+    value = (value * 10U) + (uint32_t)(name[index] - '0');
+  }
+  *file_index = value;
+  return true;
 }
 
 static bool IsCompletedLogPath(const char *path)
@@ -1952,14 +2038,25 @@ static bool IsCompletedLogPath(const char *path)
   return true;
 }
 
-static FRESULT BuildCompletedLogList(uint32_t *file_count)
+static FRESULT BuildCompletedLogList(uint32_t capacity,
+                                     uint32_t before_session_id,
+                                     uint32_t before_file_index,
+                                     uint32_t *file_count,
+                                     uint32_t *total_count,
+                                     bool *has_more)
 {
   DIR root;
   FILINFO session_info;
   FRESULT result;
   uint32_t count = 0U;
+  uint32_t eligible_count = 0U;
+  uint32_t total = 0U;
+  bool cursor_present = (before_session_id != 0U) ||
+                        (before_file_index != 0U);
 
   *file_count = 0U;
+  *total_count = 0U;
+  *has_more = false;
   if (!storage_mounted)
   {
     return FR_NOT_READY;
@@ -1996,28 +2093,69 @@ static FRESULT BuildCompletedLogList(uint32_t *file_count)
     }
     for (;;)
     {
+      uint32_t file_index;
+      uint32_t position;
+      uint32_t move;
+      CanLogFileInfo *destination;
+
       result = f_readdir(&session, &file_info);
       if ((result != FR_OK) || (file_info.fname[0] == '\0'))
       {
         break;
       }
       if (((file_info.fattrib & AM_DIR) != 0U) ||
-          !HasCompletedLogExtension(file_info.fname))
+          !ParseCompletedLogFile(file_info.fname, &file_index))
       {
         continue;
       }
-      if (count < CAN_LOG_LIST_MAX)
+      ++total;
+      if (cursor_present &&
+          ((session_id > before_session_id) ||
+           ((session_id == before_session_id) &&
+            (file_index >= before_file_index))))
       {
-        CanLogFileInfo *destination = &request_files[count++];
-        (void)snprintf(destination->path, sizeof(destination->path),
-                       "/CANSNIFF/LOGS/%s/%s", session_info.fname,
-                       file_info.fname);
-        destination->session_id = session_id;
-        destination->size_bytes = (uint64_t)file_info.fsize;
+        continue;
       }
+      ++eligible_count;
+
+      /* FatFs does not promise directory enumeration order. Keep only the
+         newest requested entries, sorted by session and file number. */
+      position = 0U;
+      while (position < count)
+      {
+        const CanLogFileInfo *current = &request_files[position];
+        if ((current->session_id < session_id) ||
+            ((current->session_id == session_id) &&
+             (current->file_index < file_index)))
+        {
+          break;
+        }
+        ++position;
+      }
+      if (position >= capacity)
+      {
+        continue;
+      }
+      if (count < capacity)
+      {
+        ++count;
+      }
+      move = count - 1U;
+      while (move > position)
+      {
+        request_files[move] = request_files[move - 1U];
+        --move;
+      }
+      destination = &request_files[position];
+      (void)snprintf(destination->path, sizeof(destination->path),
+                     "/CANSNIFF/LOGS/%s/%s", session_info.fname,
+                     file_info.fname);
+      destination->session_id = session_id;
+      destination->file_index = file_index;
+      destination->size_bytes = (uint64_t)file_info.fsize;
     }
     (void)f_closedir(&session);
-    if ((result != FR_OK) || (count >= CAN_LOG_LIST_MAX))
+    if (result != FR_OK)
     {
       break;
     }
@@ -2026,6 +2164,8 @@ static FRESULT BuildCompletedLogList(uint32_t *file_count)
   if (result == FR_OK)
   {
     *file_count = count;
+    *total_count = total;
+    *has_more = eligible_count > count;
   }
   return result;
 }
@@ -2038,11 +2178,16 @@ static bool HandleStorageRequests(void)
   {
     FRESULT result = FR_OK;
     uint32_t count = 0U;
+    uint32_t total = 0U;
+    bool has_more = false;
     uint64_t size = 0U;
 
     if (request.type == CAN_LOG_REQUEST_LIST)
     {
-      result = BuildCompletedLogList(&count);
+      result = BuildCompletedLogList(request.length,
+                                     (uint32_t)(request.offset >> 32U),
+                                     (uint32_t)request.offset,
+                                     &count, &total, &has_more);
     }
     else if (request.type == CAN_LOG_REQUEST_DOWNLOAD_OPEN)
     {
@@ -2108,6 +2253,8 @@ static bool HandleStorageRequests(void)
     }
 
     response_count = count;
+    response_total = total;
+    response_has_more = has_more;
     response_size = size;
     response_error = (int32_t)result;
     response_success = result == FR_OK;
@@ -2127,6 +2274,7 @@ void CanLogger_StorageTask(void)
   storage_mounted = false;
   storage_file_open = false;
   storage_download_open = false;
+  storage_pending_block_valid = false;
   storage_task_handle = xTaskGetCurrentTaskHandle();
   storage_last_mount_tick = HAL_GetTick() - CAN_LOG_MOUNT_RETRY_MS;
 
@@ -2151,23 +2299,9 @@ void CanLogger_StorageTask(void)
       (void)StorageMount();
     }
 
-    if (xQueueReceive(ready_queue, &item, 0U) == pdPASS)
-    {
-      handled_work = true;
-      if (item.type == CAN_LOG_ITEM_CONFIGURATION)
-      {
-        HandleConfigurationItem(&item);
-      }
-      else if (item.block_index < CAN_LOG_BLOCK_COUNT)
-      {
-        HandleBlockItem(item.block_index, item.generation);
-      }
-    }
-    else
-    {
-      handled_work = HandleStorageRequests();
-    }
-
+    /* Open the recovered/new session before removing its oldest block from
+       the queue.  A failed write then leaves that block owned by this task
+       and it is retried first after the next mount. */
     if (storage_mounted && !storage_file_open &&
         (storage_session_id == 0U) &&
         (storage_configuration.mode != CAN_LOG_MODE_OFF))
@@ -2179,6 +2313,49 @@ void CanLogger_StorageTask(void)
         StatusAddWriteError((int32_t)result, 0U);
         StorageUnmount(CAN_LOG_CARD_ERROR, (int32_t)result);
       }
+    }
+
+    if (storage_pending_block_valid)
+    {
+      if (HandleBlockItem(storage_pending_block.block_index,
+                          storage_pending_block.generation))
+      {
+        storage_pending_block_valid = false;
+        handled_work = true;
+      }
+    }
+    else if (xQueuePeek(ready_queue, &item, 0U) == pdPASS)
+    {
+      if (item.type == CAN_LOG_ITEM_CONFIGURATION)
+      {
+        if (xQueueReceive(ready_queue, &item, 0U) == pdPASS)
+        {
+          HandleConfigurationItem(&item);
+          handled_work = true;
+        }
+      }
+      else if ((item.block_index < CAN_LOG_BLOCK_COUNT) &&
+               (storage_file_open || StorageStopRequested() ||
+                (public_status.card_state == CAN_LOG_CARD_FULL)))
+      {
+        if (xQueueReceive(ready_queue, &item, 0U) == pdPASS)
+        {
+          if (!HandleBlockItem(item.block_index, item.generation))
+          {
+            storage_pending_block = item;
+            storage_pending_block_valid = true;
+          }
+          else
+          {
+            handled_work = true;
+          }
+        }
+      }
+    }
+
+    if (!handled_work)
+    {
+      handled_work = HandleStorageRequests();
     }
 
     now = HAL_GetTick();
@@ -2196,8 +2373,14 @@ void CanLogger_StorageTask(void)
     if (storage_mounted &&
         ((uint32_t)(now - storage_last_space_tick) >= CAN_LOG_SPACE_UPDATE_MS))
     {
+      FRESULT result;
       storage_last_space_tick = now;
-      (void)StorageUpdateFreeSpace();
+      result = StorageUpdateFreeSpace();
+      if (result != FR_OK)
+      {
+        StatusAddWriteError((int32_t)result, 0U);
+        StorageUnmount(CAN_LOG_CARD_ERROR, (int32_t)result);
+      }
     }
     if (!handled_work)
     {

@@ -31,7 +31,7 @@
 | GET | `/api/v1/snapshots/frames?offset=0&limit=32` | снимок последних CAN-кадров |
 | GET | `/api/v1/snapshots/nodes/{id}/events?limit=32` | события ноды |
 | GET | `/api/v1/snapshots/nodes/{id}/objects?limit=32` | объекты SDO ноды |
-| GET | `/api/v1/logs` | завершённые `.CSL` через `storageTask` |
+| GET | `/api/v1/logs?limit=16&before_session=32&before_file=4` | страница завершённых `.CSL`, новые сначала |
 | GET | `/api/v1/logs/{session}/{file}` | скачать завершённый `.CSL` |
 | GET Upgrade | `/api/v1/stream` | Live WebSocket с бинарными CAN-кадрами |
 
@@ -72,8 +72,11 @@ WebSocket помещается в один TCP MSS.
 
 ## Скачивание завершённых логов
 
-`GET /api/v1/logs` возвращает для каждого файла поле `download_url`, например
-`/api/v1/logs/S000032/L000001.CSL`. Этот URL отдаёт файл с `Content-Length`,
+`GET /api/v1/logs` возвращает файлы от новых к старым и для каждого файла
+содержит поле `download_url`, например `/api/v1/logs/S000032/L000001.CSL`.
+Размер страницы задаётся параметром `limit` (не более 32). Если `has_more`
+равен `true`, поля `session_id` и `file_index` из `next_cursor` передаются в
+следующий запрос как `before_session` и `before_file`. Этот URL отдаёт файл с `Content-Length`,
 `Content-Disposition: attachment` и `Accept-Ranges: bytes`. Поддерживается один
 диапазон `Range: bytes=start-end`, включая открытый конец `bytes=start-`, поэтому
 браузер или другой клиент может продолжить прерванную загрузку. `HEAD` для того

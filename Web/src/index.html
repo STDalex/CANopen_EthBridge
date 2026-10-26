@@ -71,6 +71,10 @@
       <div class="panel">
         <div class="section-title"><div><span class="eyebrow">microSD</span><h2>Завершённые логи</h2></div><button id="refresh-logs" class="secondary">Обновить</button></div>
         <div id="log-list" class="log-list empty-state">Список логов ещё не загружен</div>
+        <div class="log-pagination" aria-label="Навигация по страницам логов">
+          <span id="log-page-status">Страница 1</span>
+          <div><button id="logs-previous" class="ghost" disabled>Назад</button><label class="log-page-picker"><span>Страница</span><select id="log-page-select" aria-label="Выберите страницу логов" disabled><option value="0">1 из 1</option></select></label><button id="logs-next" class="secondary" disabled>Дальше</button></div>
+        </div>
       </div>
     </section>
 

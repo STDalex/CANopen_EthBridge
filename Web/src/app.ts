@@ -11,7 +11,9 @@ interface NodeEvent { timestamp_us: number; id: number; type: string; sdo_status
 interface LoggerConfig { mode: 'full' | 'selected'; selected_nodes: number[]; recording: boolean; active_mode: 'off' | 'full' | 'selected'; card_state?: string; file?: string; file_size_bytes?: number; free_bytes?: number; stored_frames?: number; dropped_frames?: number; write_errors?: number; recoveries?: number; last_error?: number; selected_node_count?: number }
 interface NetworkConfig { dhcp_enabled: boolean; static_ip: string; netmask: string; gateway: string; http_port: number; dhcp_timeout_ms: number }
 interface CanConfig { bitrate_kbps: number; auto_bitrate: boolean; deep_sdo_enabled: boolean }
-interface LogInfo { path: string; session_id: number; size_bytes: number; download_url: string }
+interface LogInfo { path: string; session_id: number; file_index: number; size_bytes: number; download_url: string }
+interface LogCursor { session_id: number; file_index: number }
+interface LogListResponse { count: number; total: number; limit: number; order: 'newest_first'; has_more: boolean; next_cursor: LogCursor | null; items: LogInfo[] }
 type TxMode = 'silent' | 'active_pending' | 'active';
 type SdoCommand = 'read' | 'write_u8' | 'write_u16' | 'write_u24' | 'write_u32';
 interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean; bridge_active: boolean }
@@ -31,6 +33,10 @@ let filteredFrames: Frame[] = [];
 let nodes: NodeInfo[] = [];
 let selectedNode: number | undefined;
 let loggerConfig: LoggerConfig = { mode: 'full', selected_nodes: [], recording: false, active_mode: 'off' };
+const LOG_PAGE_SIZE = 16;
+let logPage = 0;
+let logCursors: Array<LogCursor | undefined> = [undefined];
+let logRequestSequence = 0;
 let analyzerFrames = 0;
 let deepSdoEnabled = true;
 let paused = false;
@@ -589,15 +595,97 @@ async function loadNodeEvents(nodeId: number, showError: boolean): Promise<void>
   } catch (error) { if (showError) notify(error instanceof Error ? error.message : 'Не удалось загрузить события', true); }
 }
 
-async function refreshLogs(): Promise<void> {
+const logPageUrl = (cursor?: LogCursor): string => {
+  const cursorQuery = cursor ? `&before_session=${cursor.session_id}&before_file=${cursor.file_index}` : '';
+  return `/api/v1/logs?limit=${LOG_PAGE_SIZE}${cursorQuery}`;
+};
+
+const renderLogPageSelect = (total: number): void => {
+  const select = $<HTMLSelectElement>('log-page-select');
+  const pageCount = Math.max(1, Math.ceil(total / LOG_PAGE_SIZE));
+  if (select.options.length !== pageCount) {
+    select.replaceChildren(...Array.from({ length: pageCount }, (_, index) =>
+      new Option(`${index + 1} из ${pageCount}`, String(index))));
+  }
+  select.value = String(Math.min(logPage, pageCount - 1));
+  select.disabled = total === 0;
+};
+
+async function navigateToLogPage(targetPage: number): Promise<void> {
+  if ((targetPage < 0) || (targetPage === logPage)) return;
+  const previousPage = logPage;
   const list = $('log-list');
-  list.className = 'log-list empty-state'; list.textContent = 'Загрузка…';
+  const requestSequence = ++logRequestSequence;
+  $<HTMLButtonElement>('logs-previous').disabled = true;
+  $<HTMLButtonElement>('logs-next').disabled = true;
+  $<HTMLSelectElement>('log-page-select').disabled = true;
+  list.className = 'log-list empty-state';
+  list.textContent = `Переход на страницу ${targetPage + 1}…`;
+  text('log-page-status', `Поиск страницы ${targetPage + 1}…`);
   try {
-    const result = await api<{ items: LogInfo[] }>('/api/v1/logs');
+    for (let page = 0; page < targetPage; ++page) {
+      if (logCursors[page + 1]) continue;
+      const result = await api<LogListResponse>(logPageUrl(logCursors[page]));
+      if (requestSequence !== logRequestSequence) return;
+      if (!result.next_cursor) {
+        targetPage = page;
+        break;
+      }
+      logCursors[page + 1] = result.next_cursor;
+    }
+    logPage = targetPage;
+    await refreshLogs();
+  } catch (error) {
+    if (requestSequence !== logRequestSequence) return;
+    logPage = previousPage;
+    notify(error instanceof Error ? error.message : 'Не удалось перейти на страницу', true);
+    await refreshLogs();
+  }
+}
+
+async function refreshLogs(reset = false): Promise<void> {
+  if (reset) {
+    logPage = 0;
+    logCursors = [undefined];
+  }
+  const list = $('log-list');
+  const previous = $<HTMLButtonElement>('logs-previous');
+  const next = $<HTMLButtonElement>('logs-next');
+  const pageSelect = $<HTMLSelectElement>('log-page-select');
+  const requestSequence = ++logRequestSequence;
+  const cursor = logCursors[logPage];
+  list.className = 'log-list empty-state'; list.textContent = 'Загрузка…';
+  previous.disabled = true;
+  next.disabled = true;
+  pageSelect.disabled = true;
+  try {
+    const result = await api<LogListResponse>(logPageUrl(cursor));
+    if (requestSequence !== logRequestSequence) return;
+    if (!result.items.length && logPage > 0) {
+      --logPage;
+      logCursors.length = logPage + 1;
+      await refreshLogs();
+      return;
+    }
+    const firstItem = result.items.length ? (logPage * LOG_PAGE_SIZE) + 1 : 0;
+    const lastItem = result.items.length ? firstItem + result.items.length - 1 : 0;
+    text('log-page-status', result.total ? `Страница ${logPage + 1} · ${firstItem}–${lastItem} из ${formatInt(result.total)}` : 'Логов нет');
+    renderLogPageSelect(result.total);
+    previous.disabled = logPage === 0;
+    next.disabled = !result.has_more || result.next_cursor === null;
+    if (result.next_cursor) logCursors[logPage + 1] = result.next_cursor;
+    else logCursors.length = logPage + 1;
     if (!result.items.length) { list.textContent = 'Завершённых логов нет'; return; }
     list.className = 'log-list';
     list.innerHTML = result.items.map(log => `<div class="log-row"><code>${escapeHtml(log.path)}</code><span>${formatBytes(log.size_bytes)}</span><a href="${escapeHtml(log.download_url)}" download><button>Скачать</button></a></div>`).join('');
-  } catch (error) { list.textContent = 'Список недоступен'; notify(error instanceof Error ? error.message : 'Не удалось загрузить логи', true); }
+  } catch (error) {
+    if (requestSequence !== logRequestSequence) return;
+    list.textContent = 'Список недоступен';
+    text('log-page-status', 'Не удалось загрузить страницу');
+    previous.disabled = logPage === 0;
+    pageSelect.disabled = false;
+    notify(error instanceof Error ? error.message : 'Не удалось загрузить логи', true);
+  }
 }
 
 async function loadSettings(): Promise<void> {
@@ -630,7 +718,7 @@ async function loggerCommand(action: 'start'|'stop'): Promise<void> {
     loggerConfig = await api<LoggerConfig>(`/api/v1/logger/${action}`, { method: 'POST', body: '{}' });
     renderLoggerControls();
     notify(action === 'start' ? 'Запись запущена' : 'Запись остановлена');
-    if ($('tab-logs').classList.contains('active')) await refreshLogs();
+    if ($('tab-logs').classList.contains('active')) await refreshLogs(true);
   } catch (error) { notify(error instanceof Error ? error.message : 'Команда logger не выполнена', true); }
 }
 
@@ -674,7 +762,7 @@ function bindUi(): void {
   document.querySelectorAll<HTMLButtonElement>('.tabs button[data-tab]').forEach(button => button.onclick = () => {
     document.querySelectorAll('.tabs button,.tab').forEach(item => item.classList.remove('active'));
     button.classList.add('active'); $(`tab-${button.dataset.tab}`).classList.add('active');
-    if (button.dataset.tab === 'logs') void refreshLogs();
+    if (button.dataset.tab === 'logs') void refreshLogs(true);
     if (button.dataset.tab === 'settings') void loadSettings();
     if (button.dataset.tab === 'transmit') { void refreshTx(true); void refreshTxHistory(); }
   });
@@ -693,7 +781,10 @@ function bindUi(): void {
   $('pause-stream').onclick = () => { paused = !paused; $('pause-stream').textContent = paused ? 'Продолжить' : 'Пауза'; };
   $('clear-stream').onclick = () => { frameBuffer.length = 0; pendingFrames = []; filterDirty = true; renderVisibleFrames(); };
   $('refresh-nodes').onclick = () => void refreshNodes(true);
-  $('refresh-logs').onclick = () => void refreshLogs();
+  $('refresh-logs').onclick = () => void refreshLogs(true);
+  $('logs-previous').onclick = () => void navigateToLogPage(logPage - 1);
+  $('logs-next').onclick = () => void navigateToLogPage(logPage + 1);
+  $<HTMLSelectElement>('log-page-select').onchange = event => void navigateToLogPage(Number((event.target as HTMLSelectElement).value));
   $('reset-statistics').onclick = () => void resetStatistics();
   document.querySelectorAll<HTMLButtonElement>('[data-node-view]').forEach(button => button.onclick = () => {
     document.querySelectorAll('[data-node-view]').forEach(item => item.classList.remove('active'));
