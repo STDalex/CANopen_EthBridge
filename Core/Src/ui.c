@@ -25,6 +25,7 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define LCD_WIDTH              480U
 #define LCD_HEIGHT             272U
 #define LCD_FRAMEBUFFER        0xC0000000UL
+#define DISPLAY_IDLE_TIMEOUT_MS 180000U
 #define UI_DRAW_LINES          24U
 #define UI_VISIBLE_ROWS        12U
 #define UI_HISTORY_LENGTH      256U
@@ -163,6 +164,9 @@ static const lv_buttonmatrix_ctrl_t tx_hex_keyboard_ctrl[] =
 };
 
 static uint16_t draw_buffer[LCD_WIDTH * UI_DRAW_LINES] __attribute__((aligned(32)));
+static uint32_t display_last_touch_ms;
+static bool display_backlight_on;
+static bool display_wake_touch_active;
 static lv_obj_t *main_screen;
 static lv_obj_t *monitor_screen;
 static lv_obj_t *settings_screen;
@@ -426,6 +430,13 @@ static void Display_Flush(lv_display_t *display, const lv_area_t *area, uint8_t 
   lv_display_flush_ready(display);
 }
 
+static void Display_SetBacklight(bool enabled)
+{
+  HAL_GPIO_WritePin(LCD_BL_CTRL_GPIO_Port, LCD_BL_CTRL_Pin,
+                    enabled ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  display_backlight_on = enabled;
+}
+
 static void Touch_Read(lv_indev_t *indev, lv_indev_data_t *data)
 {
   uint16_t x = 0U;
@@ -434,9 +445,24 @@ static void Touch_Read(lv_indev_t *indev, lv_indev_data_t *data)
   (void)indev;
 
   (void)TouchFT5336_Read(&x, &y, &pressed);
+  if (pressed)
+  {
+    display_last_touch_ms = HAL_GetTick();
+    if (!display_backlight_on)
+    {
+      Display_SetBacklight(true);
+      display_wake_touch_active = true;
+    }
+  }
+
   data->point.x = (int32_t)x;
   data->point.y = (int32_t)y;
-  data->state = pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  data->state = (pressed && !display_wake_touch_active) ?
+                LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  if (!pressed)
+  {
+    display_wake_touch_active = false;
+  }
 }
 
 static void Bitrate_SelectorClicked(lv_event_t *event)
@@ -2404,6 +2430,10 @@ void Ui_Init(void)
   initial_bitrate = Find_BitrateOption(initial_settings.can_bitrate_kbps);
   deep_sdo_mode = initial_settings.deep_sdo_enabled;
 
+  display_last_touch_ms = HAL_GetTick();
+  display_wake_touch_active = false;
+  Display_SetBacklight(true);
+
   lv_init();
   lv_tick_set_cb(HAL_GetTick);
 
@@ -3246,6 +3276,12 @@ void Ui_TaskLoop(void)
   uint32_t now = HAL_GetTick();
 
   CanScanner_Update();
+
+  if (display_backlight_on &&
+      ((now - display_last_touch_ms) >= DISPLAY_IDLE_TIMEOUT_MS))
+  {
+    Display_SetBacklight(false);
+  }
 
   if (rows_dirty)
   {
