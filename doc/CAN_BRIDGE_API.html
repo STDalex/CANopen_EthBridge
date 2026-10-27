@@ -216,6 +216,7 @@
         <a href="#logic">Логика</a>
         <a href="#protocol">WebSocket</a>
         <a href="#reliability">Надёжность</a>
+        <a href="#emcy">EMCY</a>
         <a href="#limits">Ограничения</a>
         <a href="#swagger">Swagger API</a>
       </nav>
@@ -228,7 +229,7 @@
         <div>
           <div class="kicker">CAN–Ethernet Bridge · protocol v1</div>
           <h1>Управляемый доступ к CANopen через Ethernet</h1>
-          <p class="lead">API для диагностических клиентов, которым нужны транзакции expedited SDO и непрерывный поток всех кадров CAN. Bridge управляет режимом передачи и безопасно возвращает устройство в SILENT при завершении сессии.</p>
+          <p class="lead">API для диагностических клиентов, которым нужны транзакции expedited SDO, команды NMT и непрерывный поток всех кадров CAN. Bridge управляет режимом передачи и безопасно возвращает устройство в SILENT при завершении сессии.</p>
           <div class="hero-actions">
             <a class="button" href="#quickstart">Начать интеграцию</a>
             <a class="button secondary" href="#swagger">Открыть Swagger</a>
@@ -252,10 +253,11 @@
       <div class="shell">
         <div class="section-head">
           <div class="eyebrow">01 · Назначение</div>
-          <div><h2 id="purpose-title">Не прозрачный туннель, а диспетчер SDO-транзакций</h2><p>Клиент не отправляет произвольные CAN-кадры. Он описывает операцию CANopen, а прошивка формирует стандартный COB-ID, контролирует передачу, сопоставляет ответ и возвращает итог.</p></div>
+          <div><h2 id="purpose-title">Не прозрачный туннель, а диспетчер CANopen-команд</h2><p>Клиент не отправляет произвольные CAN-кадры. Он описывает SDO-операцию или NMT-команду, а прошивка формирует стандартный COB-ID и контролирует передачу.</p></div>
         </div>
         <div class="grid three">
           <article class="card"><span class="metric">SDO</span><h3>Чтение и запись объектов</h3><p>Поддерживаются expedited read и write на 8, 16, 24 или 32 бита для Node ID 1…127.</p></article>
+          <article class="card"><span class="metric">NMT</span><h3>Управление состоянием нод</h3><p>REST-команда позволяет запустить, остановить, перевести в Pre-operational или перезапустить одну ноду либо все ноды broadcast-адресом 0.</p></article>
           <article class="card"><span class="metric">CSWS</span><h3>Параллельный CAN-поток</h3><p>В том же WebSocket приходят бинарные пакеты со всеми кадрами, метками времени и признаками Bridge-транзакций.</p></article>
           <article class="card"><span class="metric">10 s</span><h3>Fail-safe lease</h3><p>Если heartbeat исчезает, Bridge отменяет ожидания, освобождает TX и принудительно переводит CAN в SILENT.</p></article>
         </div>
@@ -474,10 +476,24 @@ except (SocketTimeout, ConnectionClosed, InvalidWebSocketFrame):
       </div>
     </section>
 
+    <section id="emcy" aria-labelledby="emcy-title">
+      <div class="shell">
+        <div class="section-head">
+          <div class="eyebrow">06 · CANopen EMCY</div>
+          <div><h2 id="emcy-title">Авария устройства, а не ошибка HTTP</h2><p>EMCY передаётся самим CANopen-узлом с COB-ID <code>0x080 + node_id</code>. Первые два байта образуют little-endian код ошибки, байт 2 содержит Error Register <code>0x1001</code>, байты 3…7 зависят от производителя.</p></div>
+        </div>
+        <div class="grid two">
+          <article class="card"><h3><code>20 73 01 01 00 00 00 00</code></h3><p>Для Baumer IVO GBAM это код <code>0x7320 Position error</code>, Generic Error в <code>0x1001</code> и установленный бит Position error в alarms <code>0x6503</code>. При быстром вращении измеренное положение следует считать временно недостоверным.</p></article>
+          <article class="card"><h3><code>00 00 …</code></h3><p>Код <code>0x0000</code> означает Error reset / No error. Он закрывает ранее объявленную аварию. Историю последних событий можно читать через <code>0x1003</code>; коммуникационные проблемы CAN обычно используют коды семейства <code>0x81xx</code>.</p></article>
+        </div>
+        <aside class="card callout" style="margin-top:14px"><strong>Практическая проверка.</strong><p>Если <code>0x7320</code> появляется только при резком вращении, проверьте допустимую скорость, питание, разъём, люфт и биение вала. Если он возникает при медленном плавном движении, вероятна неисправность измерительной системы. Подробная структура и команды чтения приведены в <code>doc/CANOPEN_EMCY.md</code>.</p></aside>
+      </div>
+    </section>
+
     <section id="limits" aria-labelledby="limits-title">
       <div class="shell">
         <div class="section-head">
-          <div class="eyebrow">06 · Ограничения</div>
+          <div class="eyebrow">07 · Ограничения</div>
           <div><h2 id="limits-title">Что должен учитывать клиент</h2><p>Ограничения ниже относятся к протоколу v1 и текущей реализации прошивки.</p></div>
         </div>
         <div class="limits">
@@ -493,6 +509,7 @@ except (SocketTimeout, ConnectionClosed, InvalidWebSocketFrame):
           <div class="limit"><span>10</span><p><strong>Нет автоматических повторов.</strong> После timeout, abort или driver error решение о retry принимает клиент.</p></div>
           <div class="limit"><span>11</span><p><strong>Нет auth и TLS.</strong> Любой узел сети может включить или выключить Bridge и получить <code>session_id</code>. Использовать только в изолированной доверенной сети.</p></div>
           <div class="limit"><span>12</span><p><strong>Swagger не является WS-клиентом.</strong> Он выполняет REST-запросы и показывает контракт; для WebSocket используйте приложение или библиотеку RFC 6455.</p></div>
+          <div class="limit"><span>13</span><p><strong>NMT включает ACTIVE.</strong> Успешный <code>POST /api/v1/can/nmt</code> оставляет CAN в ACTIVE для ACK и последующего обмена. Для возврата в пассивный режим явно отправьте <code>{"mode":"silent"}</code> в <code>/api/v1/can/mode</code>.</p></div>
         </div>
         <aside class="card callout" style="margin-top:14px"><strong>CORS.</strong><p>Прошивка не добавляет CORS-заголовки. Кнопка Try it out в Swagger работает, когда документация обслуживается с того же origin, что и API, либо когда запрос выполняется не из браузера. Для локальной диагностики надёжнее использовать curl, Python или Postman.</p></aside>
       </div>
@@ -501,7 +518,7 @@ except (SocketTimeout, ConnectionClosed, InvalidWebSocketFrame):
     <section id="swagger" aria-labelledby="swagger-title">
       <div class="shell">
         <div class="section-head">
-          <div class="eyebrow">07 · OpenAPI 3.1</div>
+          <div class="eyebrow">08 · OpenAPI 3.1</div>
           <div><h2 id="swagger-title">REST API в Swagger UI</h2><p>Примеры запросов и ответов встроены в контракт. Адрес по умолчанию — <code>http://192.168.1.7</code>; его можно заменить в поле Servers.</p></div>
         </div>
         <aside class="card callout" style="margin-bottom:14px">
@@ -534,12 +551,32 @@ except (SocketTimeout, ConnectionClosed, InvalidWebSocketFrame):
       openapi: "3.1.0",
       info: {
         title: "CanSniff CAN Bridge API",
-        version: "1.0.0",
-        description: "REST-часть CAN–Ethernet Bridge v1. Управляет сессией, после чего обмен SDO и поток CAN идут через WebSocket. Авторизация в v1 отсутствует."
+        version: "1.1.0",
+        description: "REST-часть CAN–Ethernet Bridge v1. Управляет режимом CAN, командами NMT и Bridge-сессией, после чего обмен SDO и поток CAN идут через WebSocket. Авторизация в v1 отсутствует."
       },
       servers: [{ url: "http://192.168.1.7", description: "CanSniff (адрес по умолчанию)" }],
-      tags: [{ name: "Bridge", description: "Жизненный цикл CAN Bridge" }],
+      tags: [{ name: "CAN control", description: "Режим CAN и команды NMT" }, { name: "Bridge", description: "Жизненный цикл CAN Bridge" }],
       paths: {
+        "/api/v1/can/mode": {
+          get: {
+            tags: ["CAN control"], summary: "Получить режим CAN", operationId: "getCanMode",
+            responses: { "200": { description: "Текущий режим", content: { "application/json": { schema: { $ref: "#/components/schemas/CanMode" }, example: { mode: "active", tx_gate_enabled: true, active_latched: true, bitrate_kbps: 1000, sync_state: "manual", safety_reason: "user", queue_depth: 0, transmitting: false, bridge_active: false } } } } }
+          },
+          post: {
+            tags: ["CAN control"], summary: "Явно выбрать ACTIVE или SILENT", operationId: "setCanMode",
+            description: "Для active обязательно confirmed=true. Явно включённый ACTIVE сохраняется после одиночной передачи до запроса SILENT, смены bitrate или защитного отключения.",
+            requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/CanModeRequest" }, examples: { active: { value: { mode: "active", confirmed: true } }, silent: { value: { mode: "silent" } } } } } },
+            responses: { "202": { description: "Режим принят", content: { "application/json": { schema: { $ref: "#/components/schemas/CanMode" } } } }, "409": { description: "CAN не синхронизирован или Bridge активен", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } }, "422": { description: "Некорректный режим или нет подтверждения", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } } }
+          }
+        },
+        "/api/v1/can/nmt": {
+          post: {
+            tags: ["CAN control"], summary: "Отправить команду CANopen NMT", operationId: "sendNmt",
+            description: "Формирует стандартный кадр COB-ID 0x000, DLC 2: байт команды и Node ID. node_id=0 адресует все ноды. Запрос включает и фиксирует ACTIVE; верните SILENT отдельным запросом режима, когда передача и ACK больше не нужны.",
+            requestBody: { required: true, content: { "application/json": { schema: { $ref: "#/components/schemas/NmtRequest" }, examples: { startNode2: { summary: "Start Remote Node 2", value: { command: "start", node_id: 2, confirmed: true } }, resetCommunication2: { summary: "Reset Communication node 2", value: { command: "reset_communication", node_id: 2, confirmed: true } }, stopAll: { summary: "Broadcast Stop", value: { command: "stop", node_id: 0, confirmed: true } } } } } },
+            responses: { "202": { description: "NMT поставлена в TX-очередь", content: { "application/json": { schema: { $ref: "#/components/schemas/NmtAccepted" }, example: { sequence: 42, status: "queued", command: "start", node_id: 2 } } } }, "409": { description: "CAN не готов или Bridge активен", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } }, "422": { description: "Некорректная команда, Node ID или нет confirmed=true", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } }, "429": { description: "TX-очередь заполнена", content: { "application/json": { schema: { $ref: "#/components/schemas/Error" } } } } }
+          }
+        },
         "/api/v1/bridge/status": {
           get: {
             tags: ["Bridge"], summary: "Получить состояние Bridge", operationId: "getBridgeStatus",
@@ -594,6 +631,11 @@ except (SocketTimeout, ConnectionClosed, InvalidWebSocketFrame):
             }, example: bridgeStatusExample
           },
           Error: { type: "object", required: ["error", "message"], properties: { error: { type: "string" }, message: { type: "string" } } },
+          CanMode: { type: "object", required: ["mode", "tx_gate_enabled", "active_latched", "bitrate_kbps", "sync_state", "safety_reason", "queue_depth", "transmitting", "bridge_active"], properties: { mode: { type: "string", enum: ["silent", "active_pending", "active"] }, tx_gate_enabled: { type: "boolean" }, active_latched: { type: "boolean", description: "ACTIVE был явно запрошен и не будет снят после одиночной передачи" }, bitrate_kbps: { type: "integer" }, sync_state: { type: "string", enum: ["searching", "locked", "manual"] }, safety_reason: { type: "string" }, queue_depth: { type: "integer" }, transmitting: { type: "boolean" }, bridge_active: { type: "boolean" } } },
+          CanModeRequest: { type: "object", required: ["mode"], properties: { mode: { type: "string", enum: ["active", "silent"] }, confirmed: { type: "boolean", description: "Обязательно true для ACTIVE" } } },
+          NmtCommand: { type: "string", enum: ["start", "stop", "pre_operational", "reset_node", "reset_communication"] },
+          NmtRequest: { type: "object", required: ["command", "node_id", "confirmed"], properties: { command: { $ref: "#/components/schemas/NmtCommand" }, node_id: { type: "integer", minimum: 0, maximum: 127, description: "0 означает broadcast" }, confirmed: { const: true } } },
+          NmtAccepted: { type: "object", required: ["sequence", "status", "command", "node_id"], properties: { sequence: { type: "integer", minimum: 1 }, status: { const: "queued" }, command: { $ref: "#/components/schemas/NmtCommand" }, node_id: { type: "integer", minimum: 0, maximum: 127 } } },
           ResultStatus: { type: "string", enum: ["none", "completed", "abort", "timeout", "bus_off", "driver_error", "cancelled", "protocol_error"] },
           SdoCommand: { type: "string", enum: ["read", "write_u8", "write_u16", "write_u24", "write_u32"] },
           HelloMessage: { type: "object", required: ["type", "protocol", "mode", "session_id", "lease_ms", "sequence"], properties: { type: { const: "hello" }, protocol: { const: 1 }, mode: { const: "bridge" }, session_id: { type: "integer" }, lease_ms: { const: 10000 }, sequence: { type: "integer" } }, example: { type: "hello", protocol: 1, mode: "bridge", session_id: 123456789, lease_ms: 10000, sequence: 456 } },

@@ -208,7 +208,7 @@ void CanScanner_Update(void)
         (capture.state == CAN_SYNC_MANUAL) &&
         (capture.operating_mode == CAN_OPERATING_SILENT))
     {
-      if (CanControl_RequestActive(true))
+      if (CanControl_RequestActiveTransient())
       {
         taskENTER_CRITICAL();
         scanner.status.phase = CAN_SCANNER_ENABLING_TX;

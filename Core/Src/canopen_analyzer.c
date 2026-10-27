@@ -578,6 +578,11 @@ void CanopenAnalyzer_ProcessFrame(const CanFrameRecord *frame)
   node->snapshot.last_seen_us = frame->timestamp_us;
   ++node->snapshot.frame_count;
   node->snapshot.byte_count += frame->dlc;
+  if ((decoded.type == CANOPEN_MESSAGE_HEARTBEAT_GUARD) && (frame->dlc >= 1U))
+  {
+    node->snapshot.nmt_state = frame->data[0] & 0x7FU;
+    node->snapshot.has_nmt_state = true;
+  }
   if (decoded.type == CANOPEN_MESSAGE_SDO_RX)
   {
     ++node->snapshot.sdo_request_count;

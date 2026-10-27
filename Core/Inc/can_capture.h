@@ -93,6 +93,7 @@ typedef struct
   CanOperatingMode operating_mode;
   CanSafetyReason safety_reason;
   bool tx_gate_enabled;
+  bool active_latched;
 } CanCaptureStatus;
 
 void CanCapture_Init(void);
@@ -106,9 +107,11 @@ void CanSafety_EmergencyDisableTx(void);
 void CanControl_Task(void);
 void CanControl_RequestBitrate(uint32_t bitrate_kbps);
 bool CanControl_RequestActive(bool confirmed);
+bool CanControl_RequestActiveTransient(void);
 void CanControl_RequestSilent(void);
 void CanControl_ForceSilent(CanSafetyReason reason);
 bool CanControl_IsActive(void);
+bool CanControl_IsActiveLatched(void);
 const char *CanControl_OperatingModeName(CanOperatingMode mode);
 const char *CanControl_SafetyReasonName(CanSafetyReason reason);
 const char *CanControl_ErrorName(CanErrorKind error);

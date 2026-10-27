@@ -1597,7 +1597,20 @@ static const char *SyncStateName(CanSyncState state)
 static void WriteTxFrame(JsonWriter *writer, const CanTxFrame *frame)
 {
   CanTxSdoRequest request;
+  CanTxNmtCommand nmt_command;
+  uint8_t nmt_node_id;
   uint32_t index;
+  if (CanTx_DecodeNmt(frame, &nmt_command, &nmt_node_id))
+  {
+    WriterPrintf(writer,
+                 "\"type\":\"nmt\",\"node_id\":%u,\"command\":\"%s\","
+                 "\"can_id\":0,\"raw\":[%u,%u],\"timeout_ms\":%u",
+                 (unsigned int)nmt_node_id,
+                 CanTx_NmtCommandName(nmt_command),
+                 (unsigned int)frame->data[0], (unsigned int)frame->data[1],
+                 (unsigned int)frame->timeout_ms);
+    return;
+  }
   if (!CanTx_DecodeSdoRequest(frame, &request))
   {
     WriterPrintf(writer, "\"command\":\"invalid\",\"raw\":[");
@@ -1639,6 +1652,18 @@ static const char *SdoStatusName(CanopenSdoStatus status)
   }
 }
 
+static const char *NmtStateName(uint8_t state)
+{
+  switch (state)
+  {
+    case 0U: return "bootup";
+    case 4U: return "stopped";
+    case 5U: return "operational";
+    case 127U: return "pre_operational";
+    default: return "unknown";
+  }
+}
+
 static void WriteIpv4(JsonWriter *writer, const Ipv4Address *address)
 {
   WriterPrintf(writer, "\"%u.%u.%u.%u\"",
@@ -1654,7 +1679,7 @@ static void HandleRoot(struct netconn *connection)
     "{\"api\":\"v1\",\"endpoints\":[\"/api/v1/state\","
     "\"/api/v1/config/network\",\"/api/v1/config/can\","
     "\"/api/v1/config/logger\","
-    "\"/api/v1/can/mode\",\"/api/v1/can/tx\","
+    "\"/api/v1/can/mode\",\"/api/v1/can/nmt\",\"/api/v1/can/tx\","
     "\"/api/v1/can/tx/history\",\"/api/v1/can/tx/periodic\","
     "\"/api/v1/bridge/enable\",\"/api/v1/bridge/disable\","
     "\"/api/v1/bridge/status\",\"/api/v1/bridge\","
@@ -1669,7 +1694,7 @@ static void HandleRoot(struct netconn *connection)
     strlen("{\"api\":\"v1\",\"endpoints\":[\"/api/v1/state\","
            "\"/api/v1/config/network\",\"/api/v1/config/can\","
            "\"/api/v1/config/logger\","
-           "\"/api/v1/can/mode\",\"/api/v1/can/tx\","
+           "\"/api/v1/can/mode\",\"/api/v1/can/nmt\",\"/api/v1/can/tx\","
            "\"/api/v1/can/tx/history\",\"/api/v1/can/tx/periodic\","
            "\"/api/v1/bridge/enable\",\"/api/v1/bridge/disable\","
            "\"/api/v1/bridge/status\",\"/api/v1/bridge\","
@@ -1917,12 +1942,13 @@ static void HandleCanModeGet(struct netconn *connection, const char *status)
   CanTx_GetStatus(&tx);
   WriterBegin(&writer, connection, status);
   WriterPrintf(&writer,
-               "{\"mode\":\"%s\",\"tx_gate_enabled\":%s,"
+               "{\"mode\":\"%s\",\"tx_gate_enabled\":%s,\"active_latched\":%s,"
                "\"bitrate_kbps\":%lu,\"sync_state\":\"%s\","
                "\"safety_reason\":\"%s\",\"queue_depth\":%lu,"
                "\"transmitting\":%s,\"bridge_active\":%s}\n",
                CanControl_OperatingModeName(capture.operating_mode),
                capture.tx_gate_enabled ? "true" : "false",
+               capture.active_latched ? "true" : "false",
                (unsigned long)capture.bitrate_kbps, SyncStateName(capture.state),
                CanControl_SafetyReasonName(capture.safety_reason),
                (unsigned long)tx.queue_depth, tx.transmitting ? "true" : "false",
@@ -1971,6 +1997,88 @@ static void HandleCanModePost(struct netconn *connection, const char *body)
     return;
   }
   HandleCanModeGet(connection, "202 Accepted");
+}
+
+static void HandleCanNmtPost(struct netconn *connection, const char *body)
+{
+  JsonWriter writer;
+  CanTxNmtCommand command;
+  CanTxSubmitResult result;
+  uint32_t node_id;
+  uint32_t sequence;
+  char command_text[24];
+  bool confirmed = false;
+
+  if (CanBridge_IsActive())
+  {
+    SendError(connection, "409 Conflict", "bridge_active",
+              "NMT transmission is disabled in bridge mode");
+    return;
+  }
+  if (!JsonReadUnsigned(body, "node_id", &node_id) || (node_id > 127U))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_node_id",
+              "node_id must be between 0 (broadcast) and 127");
+    return;
+  }
+  if (!JsonReadString(body, "command", command_text, sizeof(command_text)))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_nmt_command",
+              "command is required");
+    return;
+  }
+  if (strcmp(command_text, "start") == 0) command = CAN_TX_NMT_START;
+  else if (strcmp(command_text, "stop") == 0) command = CAN_TX_NMT_STOP;
+  else if (strcmp(command_text, "pre_operational") == 0)
+    command = CAN_TX_NMT_PRE_OPERATIONAL;
+  else if (strcmp(command_text, "reset_node") == 0)
+    command = CAN_TX_NMT_RESET_NODE;
+  else if (strcmp(command_text, "reset_communication") == 0)
+    command = CAN_TX_NMT_RESET_COMMUNICATION;
+  else
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_nmt_command",
+              "command must be start, stop, pre_operational, reset_node or reset_communication");
+    return;
+  }
+  if (!JsonReadBool(body, "confirmed", &confirmed) || !confirmed)
+  {
+    SendError(connection, "422 Unprocessable Entity", "confirmation_required",
+              "NMT transmission requires confirmed=true");
+    return;
+  }
+  if (!CanControl_RequestActive(true))
+  {
+    SendError(connection, "409 Conflict", "can_not_synchronized",
+              "Select or detect a valid bitrate before transmitting");
+    return;
+  }
+  result = CanTx_SubmitNmt(command, (uint8_t)node_id, &sequence);
+  if (result == CAN_TX_SUBMIT_MODE_DISABLED)
+  {
+    SendError(connection, "409 Conflict", "can_not_ready",
+              "CAN transmit path is not available");
+    return;
+  }
+  if (result == CAN_TX_SUBMIT_QUEUE_FULL)
+  {
+    SendError(connection, "429 Too Many Requests", "tx_queue_full",
+              "The bounded CAN transmit queue is full");
+    return;
+  }
+  if (result != CAN_TX_SUBMIT_OK)
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_nmt_request",
+              "Invalid NMT command or node_id");
+    return;
+  }
+  WriterBegin(&writer, connection, "202 Accepted");
+  WriterPrintf(&writer,
+               "{\"sequence\":%lu,\"status\":\"queued\",\"command\":\"%s\","
+               "\"node_id\":%lu}\n",
+               (unsigned long)sequence, CanTx_NmtCommandName(command),
+               (unsigned long)node_id);
+  WriterEnd(&writer);
 }
 
 static void HandleCanTxPost(struct netconn *connection, const char *body)
@@ -2316,7 +2424,8 @@ static void HandleNodes(struct netconn *connection, const char *query)
       "\"sdo_requests\":%lu,\"sdo_responses\":%lu,\"sdo_started\":%lu,"
       "\"sdo_completed\":%lu,\"sdo_aborted\":%lu,\"sdo_timeouts\":%lu,"
       "\"sdo_conflicts\":%lu,\"sdo_orphans\":%lu,"
-      "\"sdo_protocol_errors\":%lu,\"sdo_errors\":%lu}",
+      "\"sdo_protocol_errors\":%lu,\"sdo_errors\":%lu,"
+      "\"has_nmt_state\":%s,\"nmt_state\":\"%s\",\"nmt_state_code\":%u}",
       index == offset ? "" : ",", (unsigned int)node->node_id,
       CanopenDecoder_TypeName(node->last_type),
       (unsigned long)node->first_seen_us, (unsigned long)node->last_seen_us,
@@ -2329,7 +2438,10 @@ static void HandleNodes(struct netconn *connection, const char *query)
       (unsigned long)node->sdo_orphan_count,
       (unsigned long)node->sdo_protocol_error_count,
       (unsigned long)(node->sdo_protocol_error_count + node->sdo_conflict_count +
-                      node->sdo_orphan_count));
+                      node->sdo_orphan_count),
+      node->has_nmt_state ? "true" : "false",
+      node->has_nmt_state ? NmtStateName(node->nmt_state) : "unknown",
+      (unsigned int)node->nmt_state);
   }
   WriterChunk(&writer, "]}\n", 3U);
   WriterEnd(&writer);
@@ -3039,6 +3151,8 @@ static bool Dispatch(struct netconn *connection, char *request)
     HandleCanModeGet(connection, "200 OK");
   else if ((strcmp(method, "POST") == 0) && (strcmp(path, "/api/v1/can/mode") == 0))
     HandleCanModePost(connection, body);
+  else if ((strcmp(method, "POST") == 0) && (strcmp(path, "/api/v1/can/nmt") == 0))
+    HandleCanNmtPost(connection, body);
   else if ((strcmp(method, "GET") == 0) && (strcmp(path, "/api/v1/can/tx") == 0))
     HandleCanTxStatus(connection);
   else if ((strcmp(method, "POST") == 0) && (strcmp(path, "/api/v1/can/tx") == 0))

@@ -31,6 +31,15 @@ typedef enum
   CAN_TX_SDO_WRITE_U32
 } CanTxSdoCommand;
 
+typedef enum
+{
+  CAN_TX_NMT_START = 0x01,
+  CAN_TX_NMT_STOP = 0x02,
+  CAN_TX_NMT_PRE_OPERATIONAL = 0x80,
+  CAN_TX_NMT_RESET_NODE = 0x81,
+  CAN_TX_NMT_RESET_COMMUNICATION = 0x82
+} CanTxNmtCommand;
+
 typedef struct
 {
   uint32_t value;
@@ -93,6 +102,12 @@ void CanTxManager_Init(void);
 void CanTxManager_Task(void);
 bool CanTx_BuildSdoRequest(const CanTxSdoRequest *request, CanTxFrame *frame);
 bool CanTx_DecodeSdoRequest(const CanTxFrame *frame, CanTxSdoRequest *request);
+bool CanTx_BuildNmt(CanTxNmtCommand command, uint8_t node_id,
+                    CanTxFrame *frame);
+bool CanTx_DecodeNmt(const CanTxFrame *frame, CanTxNmtCommand *command,
+                     uint8_t *node_id);
+CanTxSubmitResult CanTx_SubmitNmt(CanTxNmtCommand command, uint8_t node_id,
+                                 uint32_t *sequence);
 CanTxSubmitResult CanTx_SubmitSdo(const CanTxSdoRequest *request,
                                  uint32_t *sequence);
 CanTxSubmitResult CanTx_SubmitBridgeSdo(const CanTxSdoRequest *request,
@@ -112,5 +127,6 @@ void CanTx_ResetStatistics(void);
 size_t CanTx_CopyHistory(CanTxHistoryEntry *entries, size_t capacity);
 const char *CanTx_ResultName(CanTxResult result);
 const char *CanTx_SdoCommandName(CanTxSdoCommand command);
+const char *CanTx_NmtCommandName(CanTxNmtCommand command);
 
 #endif

@@ -62,6 +62,7 @@ static volatile CanOperatingMode operating_mode;
 static volatile CanSafetyReason safety_reason;
 static volatile bool requested_active;
 static volatile bool tx_gate_enabled;
+static volatile bool active_latched;
 static TaskHandle_t consumer_task;
 
 void CanSafety_EmergencyDisableTx(void)
@@ -245,6 +246,7 @@ void CanCapture_Init(void)
   safety_reason = CAN_SAFETY_POWER_ON;
   requested_active = false;
   tx_gate_enabled = false;
+  active_latched = false;
   consumer_task = NULL;
   CanSafety_EmergencyDisableTx();
   TimestampTimer_Init();
@@ -388,6 +390,7 @@ void CanCapture_ErrorIRQHandler(void)
     classified = true;
     CanSafety_EmergencyDisableTx();
     requested_active = false;
+    active_latched = false;
     operating_mode = CAN_OPERATING_ACTIVE_PENDING;
     safety_reason = CAN_SAFETY_BUS_OFF;
   }
@@ -395,6 +398,7 @@ void CanCapture_ErrorIRQHandler(void)
   {
     CanSafety_EmergencyDisableTx();
     requested_active = false;
+    active_latched = false;
     operating_mode = CAN_OPERATING_ACTIVE_PENDING;
     safety_reason = CAN_SAFETY_BUS_OFF;
   }
@@ -476,21 +480,35 @@ void CanControl_RequestBitrate(uint32_t bitrate_kbps)
   }
 }
 
-bool CanControl_RequestActive(bool confirmed)
+static bool RequestActive(bool confirmed, bool latch)
 {
   bool accepted = false;
   if (!confirmed) return false;
   taskENTER_CRITICAL();
   if ((active_bitrate != 0U) && (sync_state != CAN_SYNC_SEARCHING) &&
-      (operating_mode == CAN_OPERATING_SILENT))
+      ((operating_mode == CAN_OPERATING_SILENT) ||
+       (operating_mode == CAN_OPERATING_ACTIVE_PENDING) ||
+       (operating_mode == CAN_OPERATING_ACTIVE)))
   {
     requested_active = true;
-    operating_mode = CAN_OPERATING_ACTIVE_PENDING;
+    if (operating_mode == CAN_OPERATING_SILENT)
+      operating_mode = CAN_OPERATING_ACTIVE_PENDING;
+    if (latch) active_latched = true;
     safety_reason = CAN_SAFETY_USER;
     accepted = true;
   }
   taskEXIT_CRITICAL();
   return accepted;
+}
+
+bool CanControl_RequestActive(bool confirmed)
+{
+  return RequestActive(confirmed, true);
+}
+
+bool CanControl_RequestActiveTransient(void)
+{
+  return RequestActive(true, false);
 }
 
 void CanControl_RequestSilent(void)
@@ -503,6 +521,7 @@ void CanControl_ForceSilent(CanSafetyReason reason)
   CanSafety_EmergencyDisableTx();
   taskENTER_CRITICAL();
   requested_active = false;
+  active_latched = false;
   safety_reason = reason;
   taskEXIT_CRITICAL();
   CanTx_CancelAll();
@@ -512,6 +531,11 @@ bool CanControl_IsActive(void)
 {
   return (operating_mode == CAN_OPERATING_ACTIVE) && tx_gate_enabled &&
          ((CAN1->ESR & CAN_ESR_BOFF) == 0U);
+}
+
+bool CanControl_IsActiveLatched(void)
+{
+  return active_latched;
 }
 
 const char *CanControl_OperatingModeName(CanOperatingMode mode)
@@ -585,6 +609,7 @@ void CanControl_GetStatus(CanCaptureStatus *status)
   status->operating_mode = operating_mode;
   status->safety_reason = safety_reason;
   status->tx_gate_enabled = tx_gate_enabled;
+  status->active_latched = active_latched;
   taskEXIT_CRITICAL();
 }
 
@@ -666,6 +691,7 @@ void CanControl_Task(void)
         else
         {
           requested_active = false;
+          active_latched = false;
           operating_mode = CAN_OPERATING_SILENT;
           safety_reason = CAN_SAFETY_CONTROLLER_ERROR;
           sync_state = CAN_SYNC_SEARCHING;

@@ -46,6 +46,8 @@ typedef struct
   uint32_t sdo_conflict_count;
   uint32_t sdo_orphan_count;
   uint32_t sdo_protocol_error_count;
+  uint8_t nmt_state;
+  bool has_nmt_state;
 } CanopenNodeSnapshot;
 
 typedef struct

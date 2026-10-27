@@ -403,6 +403,62 @@ bool CanTx_DecodeSdoRequest(const CanTxFrame *frame, CanTxSdoRequest *request)
   return true;
 }
 
+bool CanTx_BuildNmt(CanTxNmtCommand command, uint8_t node_id,
+                    CanTxFrame *frame)
+{
+  if ((frame == NULL) || (node_id > 127U)) return false;
+  switch (command)
+  {
+    case CAN_TX_NMT_START:
+    case CAN_TX_NMT_STOP:
+    case CAN_TX_NMT_PRE_OPERATIONAL:
+    case CAN_TX_NMT_RESET_NODE:
+    case CAN_TX_NMT_RESET_COMMUNICATION:
+      break;
+    default:
+      return false;
+  }
+  memset(frame, 0, sizeof(*frame));
+  frame->id = 0U;
+  frame->timeout_ms = CAN_TX_DEFAULT_TIMEOUT_MS;
+  frame->dlc = 2U;
+  frame->data[0] = (uint8_t)command;
+  frame->data[1] = node_id;
+  return true;
+}
+
+bool CanTx_DecodeNmt(const CanTxFrame *frame, CanTxNmtCommand *command,
+                     uint8_t *node_id)
+{
+  CanTxNmtCommand decoded;
+  if ((frame == NULL) || (command == NULL) || (node_id == NULL) ||
+      frame->extended || frame->remote || (frame->id != 0U) ||
+      (frame->dlc != 2U) || (frame->data[1] > 127U)) return false;
+  decoded = (CanTxNmtCommand)frame->data[0];
+  switch (decoded)
+  {
+    case CAN_TX_NMT_START:
+    case CAN_TX_NMT_STOP:
+    case CAN_TX_NMT_PRE_OPERATIONAL:
+    case CAN_TX_NMT_RESET_NODE:
+    case CAN_TX_NMT_RESET_COMMUNICATION:
+      break;
+    default:
+      return false;
+  }
+  *command = decoded;
+  *node_id = frame->data[1];
+  return true;
+}
+
+CanTxSubmitResult CanTx_SubmitNmt(CanTxNmtCommand command, uint8_t node_id,
+                                 uint32_t *sequence)
+{
+  CanTxFrame frame;
+  if (!CanTx_BuildNmt(command, node_id, &frame)) return CAN_TX_SUBMIT_INVALID;
+  return SubmitFrame(&frame, sequence, CAN_TX_OWNER_NORMAL);
+}
+
 CanTxSubmitResult CanTx_SubmitSdo(const CanTxSdoRequest *request,
                                  uint32_t *sequence)
 {
@@ -555,7 +611,7 @@ bool CanTx_StopPeriodic(void)
   was_enabled = periodic_state.enabled;
   periodic_state.enabled = false;
   public_status.periodic_active = false;
-  if (was_enabled)
+  if (was_enabled && !CanControl_IsActiveLatched())
   {
     auto_silent_deadline = HAL_GetTick() + periodic_state.frame.timeout_ms;
     auto_silent_armed = true;
@@ -682,6 +738,19 @@ const char *CanTx_SdoCommandName(CanTxSdoCommand command)
   }
 }
 
+const char *CanTx_NmtCommandName(CanTxNmtCommand command)
+{
+  switch (command)
+  {
+    case CAN_TX_NMT_START: return "start";
+    case CAN_TX_NMT_STOP: return "stop";
+    case CAN_TX_NMT_PRE_OPERATIONAL: return "pre_operational";
+    case CAN_TX_NMT_RESET_NODE: return "reset_node";
+    case CAN_TX_NMT_RESET_COMMUNICATION: return "reset_communication";
+    default: return "invalid";
+  }
+}
+
 static bool PeriodicStillEnabled(uint32_t sequence)
 {
   bool enabled;
@@ -695,7 +764,7 @@ static bool EnsureActive(const CanTxQueueEntry *entry)
 {
   uint32_t started;
   if (CanControl_IsActive()) return true;
-  if (!CanControl_RequestActive(true))
+  if (!CanControl_RequestActiveTransient())
   {
     CanCaptureStatus capture;
     CanControl_GetStatus(&capture);
@@ -749,7 +818,8 @@ static uint32_t ProcessEntry(const CanTxQueueEntry *entry, uint32_t last_attempt
        whole lifetime. Returning to silent after every node would tear down
        that pass and be reported as a CAN error. Normal one-shot requests keep
        the original fail-safe auto-silent behaviour. */
-    if (tx_owner != CAN_TX_OWNER_SCANNER)
+    if ((tx_owner != CAN_TX_OWNER_SCANNER) &&
+        !CanControl_IsActiveLatched())
     {
       auto_silent_deadline = HAL_GetTick() + entry->frame.timeout_ms;
       auto_silent_armed = true;
@@ -805,7 +875,12 @@ void CanTxManager_Task(void)
     }
 
     taskENTER_CRITICAL();
-    if (auto_silent_armed && !periodic_state.enabled &&
+    if (auto_silent_armed && CanControl_IsActiveLatched())
+    {
+      auto_silent_armed = false;
+      taskEXIT_CRITICAL();
+    }
+    else if (auto_silent_armed && !periodic_state.enabled &&
         (uxQueueMessagesWaiting(tx_queue) == 0U) &&
         ((int32_t)(HAL_GetTick() - auto_silent_deadline) >= 0))
     {

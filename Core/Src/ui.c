@@ -3,6 +3,7 @@
 #include "app_version.h"
 #include "app_settings.h"
 #include "can_bridge.h"
+#include "can_capture.h"
 #include "can_log.h"
 #include "can_scanner.h"
 #include "can_tx_manager.h"
@@ -219,6 +220,8 @@ static lv_obj_t *node_events_table_body;
 static lv_obj_t *node_events_spacer;
 static lv_obj_t *node_events_pause_label;
 static lv_obj_t *node_events_mode_label;
+static lv_obj_t *node_events_nmt_button;
+static lv_obj_t *node_events_nmt_label;
 static lv_obj_t *node_events_type_header_label;
 static lv_obj_t *nodes_response_header_label;
 static lv_obj_t *event_cell_labels[UI_EVENT_VISIBLE_ROWS][7];
@@ -2155,10 +2158,10 @@ static void Format_NodeEventsTitle(char *title, uint32_t capacity)
   {
     if (node_snapshot[index].node_id == selected_node_id)
     {
-      (void)snprintf(title, capacity, "N%u %lu.%05lu OK:%lu TO:%lu AB:%lu AM:%lu",
+      (void)snprintf(title, capacity, "N%u %lu.%03lu O:%lu T:%lu A:%lu C:%lu",
                      selected_node_id,
                      (unsigned long)(analyzer_snapshot.last_timestamp_us / 1000000U),
-                     (unsigned long)((analyzer_snapshot.last_timestamp_us / 10U) % 100000U),
+                     (unsigned long)((analyzer_snapshot.last_timestamp_us / 1000U) % 1000U),
                      (unsigned long)node_snapshot[index].sdo_completed_count,
                      (unsigned long)node_snapshot[index].sdo_timeout_count,
                      (unsigned long)node_snapshot[index].sdo_aborted_count,
@@ -2166,14 +2169,16 @@ static void Format_NodeEventsTitle(char *title, uint32_t capacity)
       return;
     }
   }
-  (void)snprintf(title, capacity, "N%u %lu.%05lu OK:0 TO:0 AB:0 AM:0", selected_node_id,
+  (void)snprintf(title, capacity, "N%u %lu.%03lu O:0 T:0 A:0 C:0", selected_node_id,
                  (unsigned long)(analyzer_snapshot.last_timestamp_us / 1000000U),
-                 (unsigned long)((analyzer_snapshot.last_timestamp_us / 10U) % 100000U));
+                 (unsigned long)((analyzer_snapshot.last_timestamp_us / 1000U) % 1000U));
 }
 
 static void Refresh_NodeEventsSnapshot(void)
 {
   uint32_t content_height;
+  uint32_t index;
+  bool has_nmt = false;
   char title[48];
 
   CanopenAnalyzer_GetGlobalSnapshot(&analyzer_snapshot);
@@ -2198,6 +2203,19 @@ static void Refresh_NodeEventsSnapshot(void)
   lv_obj_set_height(node_events_spacer, (int32_t)content_height);
   Format_NodeEventsTitle(title, sizeof(title));
   lv_label_set_text(node_events_title_label, title);
+  node_snapshot_count = CanopenAnalyzer_GetNodesSnapshot(node_snapshot,
+                                                          CANOPEN_NODE_COUNT_MAX,
+                                                          &analyzer_snapshot);
+  for (index = 0U; index < node_snapshot_count; ++index)
+  {
+    if (node_snapshot[index].node_id == selected_node_id)
+    {
+      has_nmt = node_snapshot[index].has_nmt_state;
+      break;
+    }
+  }
+  lv_obj_set_hidden(node_events_nmt_button, !has_nmt);
+  if (has_nmt) lv_label_set_text(node_events_nmt_label, "START");
   Render_EventRows();
 }
 
@@ -2244,6 +2262,27 @@ static void NodeEvents_ModeClicked(lv_event_t *event)
   lv_obj_scroll_to_y(node_events_table_body, 0, LV_ANIM_OFF);
   events_programmatic_scroll = false;
   Refresh_NodeEventsSnapshot();
+}
+
+static void NodeEvents_NmtClicked(lv_event_t *event)
+{
+  CanTxSubmitResult result;
+  uint32_t sequence;
+  (void)event;
+  if (CanBridge_IsActive())
+  {
+    lv_label_set_text(node_events_nmt_label, "BUSY");
+    return;
+  }
+  if (!CanControl_RequestActive(true))
+  {
+    lv_label_set_text(node_events_nmt_label, "SYNC");
+    return;
+  }
+  result = CanTx_SubmitNmt(CAN_TX_NMT_START, selected_node_id, &sequence);
+  (void)sequence;
+  lv_label_set_text(node_events_nmt_label,
+                    result == CAN_TX_SUBMIT_OK ? "WAIT" : "BUSY");
 }
 
 static void Open_NodeEvents(lv_event_t *event)
@@ -3050,9 +3089,20 @@ void Ui_Init(void)
   }
 
   (void)Create_NavigationButton(node_events_screen, 4, 3, 44, 34, LV_SYMBOL_LEFT, nodes_screen);
-  node_events_title_label = Create_Label(node_events_screen, 54, 10, 302,
+  node_events_title_label = Create_Label(node_events_screen, 54, 10, 242,
                                          "Node transactions", lv_color_hex(0x65C7F7));
   lv_obj_set_style_text_font(node_events_title_label, &lv_font_montserrat_14, 0);
+
+  node_events_nmt_button = lv_button_create(node_events_screen);
+  lv_obj_set_size(node_events_nmt_button, 56, 34);
+  lv_obj_set_pos(node_events_nmt_button, 300, 1);
+  lv_obj_set_style_pad_all(node_events_nmt_button, 0, 0);
+  lv_obj_add_event_cb(node_events_nmt_button, NodeEvents_NmtClicked,
+                      LV_EVENT_CLICKED, NULL);
+  node_events_nmt_label = lv_label_create(node_events_nmt_button);
+  lv_label_set_text(node_events_nmt_label, "START");
+  lv_obj_center(node_events_nmt_label);
+  lv_obj_set_hidden(node_events_nmt_button, true);
 
   mode_button = lv_button_create(node_events_screen);
   lv_obj_set_size(mode_button, 56, 34);
