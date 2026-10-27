@@ -2608,13 +2608,14 @@ static void HandleNodeEvents(struct netconn *connection, uint8_t node_id,
     CanopenAnalyzer_GetNodeObjectsSnapshot(node_id, event_snapshot, CANOPEN_EVENT_SNAPSHOT_MAX) :
     CanopenAnalyzer_GetNodeEventsSnapshot(node_id, event_snapshot, CANOPEN_EVENT_SNAPSHOT_MAX);
   uint32_t limit = QueryUnsigned(query, "limit", API_DEFAULT_PAGE_SIZE, API_MAX_PAGE_SIZE);
-  uint32_t offset = count > limit ? count - limit : 0U;
+  uint32_t begin = objects && (count > limit) ? count - limit : 0U;
+  uint32_t end = !objects && (count > limit) ? limit : count;
   uint32_t index;
 
   WriterBegin(&writer, connection, "200 OK");
   WriterPrintf(&writer, "{\"node_id\":%u,\"kind\":\"%s\",\"total\":%lu,\"items\":[",
                (unsigned int)node_id, objects ? "objects" : "events", (unsigned long)count);
-  for (index = offset; index < count; ++index)
+  for (index = begin; index < end; ++index)
   {
     const CanopenNodeEventSnapshot *event = &event_snapshot[index];
     uint32_t byte;
@@ -2627,7 +2628,7 @@ static void HandleNodeEvents(struct netconn *connection, uint8_t node_id,
       "\"local_transaction\":%s,\"dlc\":%u,"
       "\"has_response_time\":%s,\"has_sdo_address\":%s,"
       "\"data_offset\":%u,\"data\":\"",
-      index == offset ? "" : ",", (unsigned long)event->frame.timestamp_us,
+      index == begin ? "" : ",", (unsigned long)event->frame.timestamp_us,
       (unsigned long)event->frame.id, CanopenDecoder_TypeName(event->type),
       SdoStatusName(event->sdo_status), (unsigned int)event->object_index,
       (unsigned int)event->object_subindex, (unsigned long)event->response_time_us,

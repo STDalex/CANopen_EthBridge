@@ -6,7 +6,7 @@ interface DeviceState { firmware: string; uptime_ms: number; network: { initiali
 interface CanErrorCounters { interrupts: number; warning: number; passive: number; bus_off: number; stuff: number; form: number; ack: number; bit_recessive: number; bit_dominant: number; crc: number; unclassified: number }
 interface CanLastError { type: string; timestamp_us: number; esr: number; tx_error_counter: number; rx_error_counter: number }
 interface Statistics { can: { received: number; ring_overflows: number; gui_overflows: number; errors: number; bus_load_permille: number; error_counters: CanErrorCounters; last_error: CanLastError }; analyzer: { frames: number; unique_nodes: number; queue_overflows: number }; logger: { stored_frames: number; dropped_frames: number; write_errors: number; recoveries: number }; tx: { queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number }; websocket: { active: boolean; connections: number; batches: number; frames: number; lost_frames: number } }
-interface NodeInfo { node_id: number; last_type: string; first_seen_us: number; last_seen_us: number; frames: number; bytes: number; sdo_requests: number; sdo_responses: number; sdo_started: number; sdo_completed: number; sdo_aborted: number; sdo_timeouts: number; sdo_conflicts: number; sdo_orphans: number; sdo_protocol_errors: number; sdo_errors: number }
+interface NodeInfo { node_id: number; last_type: string; first_seen_us: number; last_seen_us: number; frames: number; bytes: number; sdo_requests: number; sdo_responses: number; sdo_started: number; sdo_completed: number; sdo_aborted: number; sdo_timeouts: number; sdo_conflicts: number; sdo_orphans: number; sdo_protocol_errors: number; sdo_errors: number; has_nmt_state?: boolean; nmt_state?: string; nmt_state_code?: number }
 interface NodeEvent { timestamp_us: number; id: number; type: string; sdo_status: string; index: number; subindex: number; response_time_us: number; transaction_time_us: number; transferred_bytes: number; abort_code: number; extended: boolean; remote: boolean; local_tx: boolean; local_transaction: boolean; dlc: number; has_response_time: boolean; has_sdo_address: boolean; data_offset: number; data: string }
 interface LoggerConfig { mode: 'full' | 'selected'; selected_nodes: number[]; recording: boolean; active_mode: 'off' | 'full' | 'selected'; card_state?: string; file?: string; file_size_bytes?: number; free_bytes?: number; stored_frames?: number; dropped_frames?: number; write_errors?: number; recoveries?: number; last_error?: number; selected_node_count?: number }
 interface NetworkConfig { dhcp_enabled: boolean; static_ip: string; netmask: string; gateway: string; http_port: number; dhcp_timeout_ms: number }
@@ -16,9 +16,11 @@ interface LogCursor { session_id: number; file_index: number }
 interface LogListResponse { count: number; total: number; limit: number; order: 'newest_first'; has_more: boolean; next_cursor: LogCursor | null; items: LogInfo[] }
 type TxMode = 'silent' | 'active_pending' | 'active';
 type SdoCommand = 'read' | 'write_u8' | 'write_u16' | 'write_u24' | 'write_u32';
+type NmtCommand = 'start' | 'stop' | 'pre_operational' | 'reset_node' | 'reset_communication';
 interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean; bridge_active: boolean }
 interface CanTxStatus { queue_depth: number; queue_capacity: number; transmitting: boolean; queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number; last_sequence: number; last_result: string; rate_limit_fps: number; periodic_active: boolean; periodic_sequence: number; periodic_period_ms: number; periodic_attempts: number }
-interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; node_id: number; command: SdoCommand; index: number; subindex: number; value: number; can_id: number; raw: number[]; timeout_ms: number }
+interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; type?: 'nmt'; node_id: number; command: SdoCommand | NmtCommand; index?: number; subindex?: number; value?: number; can_id: number; raw: number[]; timeout_ms: number }
+interface NmtAccepted { sequence: number; status: 'queued'; command: NmtCommand; node_id: number }
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const value = document.getElementById(id);
@@ -43,7 +45,7 @@ let paused = false;
 let filterDirty = true;
 let sortKey: 'timestamp'|'id'|'type'|'node' = 'timestamp';
 let sortAsc = false;
-type NodeSort = keyof NodeInfo | 'traffic' | 'sdo_success' | 'errors';
+type NodeSort = 'node_id' | 'last_seen_us' | 'frames' | 'last_type' | 'traffic' | 'sdo_success' | 'errors';
 let nodeSort: NodeSort = 'node_id';
 let nodeSortAsc = true;
 let nodeView: 'events'|'objects' = 'events';
@@ -80,6 +82,8 @@ const txResultName = (result: string): string => ({ sent: 'Отправлен', 
 const canErrorName = (error: string): string => ({ none: 'Нет', stuff: 'Stuff error', form: 'Form error', ack: 'ACK error', bit_recessive: 'Bit recessive', bit_dominant: 'Bit dominant', crc: 'CRC error', warning: 'Error warning', passive: 'Error passive', bus_off: 'Bus-off', unclassified: 'Неклассифицированная' }[error] || error);
 const sdoCommandName = (command: SdoCommand): string => ({ read: 'Чтение', write_u8: 'Запись 8', write_u16: 'Запись 16', write_u24: 'Запись 24', write_u32: 'Запись 32' }[command]);
 const sdoValueBytes = (command: SdoCommand): number => ({ read: 0, write_u8: 1, write_u16: 2, write_u24: 3, write_u32: 4 }[command]);
+const nmtCommandName = (command: NmtCommand): string => ({ start: 'Start', stop: 'Stop', pre_operational: 'Pre-operational', reset_node: 'Reset Node', reset_communication: 'Reset Communication' }[command]);
+const nmtStateName = (state?: string): string => ({ boot_up: 'Boot-up', bootup: 'Boot-up', stopped: 'Stopped', operational: 'Operational', pre_operational: 'Pre-operational', unknown: 'Состояние неизвестно' }[state || 'unknown'] || state || 'Состояние неизвестно');
 const nodeErrorCount = (node: NodeInfo): number => node.sdo_aborted + node.sdo_timeouts + node.sdo_protocol_errors + node.sdo_conflicts + node.sdo_orphans;
 const nodeTraffic = (node: NodeInfo): number => analyzerFrames ? node.frames * 100 / analyzerFrames : 0;
 const nodeSdoSuccess = (node: NodeInfo): number | undefined => {
@@ -386,10 +390,14 @@ async function refreshTxHistory(showError = false): Promise<void> {
     }
     target.className = 'tx-history';
     target.innerHTML = result.items.map(entry => {
-      const bytes = sdoValueBytes(entry.command);
-      const value = bytes ? `0x${hex(entry.value, bytes * 2)}` : entry.raw.map(byte => hex(byte, 2)).join(' ');
+      const isNmt = entry.type === 'nmt';
+      const command = isNmt ? `NMT ${nmtCommandName(entry.command as NmtCommand)}` : sdoCommandName(entry.command as SdoCommand);
+      const bytes = isNmt ? 0 : sdoValueBytes(entry.command as SdoCommand);
+      const value = bytes && entry.value !== undefined ? `0x${hex(entry.value, bytes * 2)}` : entry.raw.map(byte => hex(byte, 2)).join(' ');
       const attempts = entry.periodic ? `<small>× ${formatInt(entry.attempt_count)}</small>` : '';
-      return `<div class="tx-history-row tx-history-grid${entry.periodic ? ' periodic' : ''}"><span>${entry.periodic ? '↻ ' : ''}#${entry.sequence}</span><span>${formatTime(entry.timestamp_us)}</span><span>${entry.node_id}</span><span>${escapeHtml(sdoCommandName(entry.command))}</span><span>0x${hex(entry.index, 4)}</span><span>0x${hex(entry.subindex, 2)}</span><span>${value}${attempts}</span><span class="tx-result-${escapeHtml(entry.result)}">${escapeHtml(txResultName(entry.result))}</span></div>`;
+      const index = isNmt || entry.index === undefined ? '—' : `0x${hex(entry.index, 4)}`;
+      const subindex = isNmt || entry.subindex === undefined ? '—' : `0x${hex(entry.subindex, 2)}`;
+      return `<div class="tx-history-row tx-history-grid${entry.periodic ? ' periodic' : ''}"><span>${entry.periodic ? '↻ ' : ''}#${entry.sequence}</span><span>${formatTime(entry.timestamp_us)}</span><span>${entry.node_id || 'ALL'}</span><span>${escapeHtml(command)}</span><span>${index}</span><span>${subindex}</span><span>${value}${attempts}</span><span class="tx-result-${escapeHtml(entry.result)}">${escapeHtml(txResultName(entry.result))}</span></div>`;
     }).join('');
   } catch (error) {
     if (showError) notify(error instanceof Error ? error.message : 'Журнал TX недоступен', true);
@@ -563,27 +571,68 @@ async function refreshNodes(showError = false): Promise<void> {
 
 function renderNodeSummary(): void {
   const node = nodes.find(item => item.node_id === selectedNode);
-  if (!node) return;
+  if (!node) {
+    $<HTMLFormElement>('nmt-form').hidden = true;
+    return;
+  }
   text('node-title', `Нода ${node.node_id}`);
   $('toggle-node-log').removeAttribute('disabled');
   $('toggle-node-log').textContent = loggerConfig.selected_nodes.includes(node.node_id) ? 'Убрать из лога' : 'В лог';
+  $<HTMLFormElement>('nmt-form').hidden = false;
+  text('nmt-state', node.has_nmt_state ? nmtStateName(node.nmt_state) : 'Нет Heartbeat / Boot-up');
   const success = nodeSdoSuccess(node);
   $('node-summary').innerHTML = `<div><span>Кадры</span><strong>${formatInt(node.frames)}</strong><small>${formatBytes(node.bytes)} · ${nodeTraffic(node).toFixed(1)}%</small></div><div><span>Последний кадр</span><strong>${formatTime(node.last_seen_us)}</strong><small>${escapeHtml(node.last_type)}</small></div><div><span>SDO запросы / ответы</span><strong>${formatInt(node.sdo_requests)} / ${formatInt(node.sdo_responses)}</strong><small>успех ${success === undefined ? '—' : `${success.toFixed(1)}%`}</small></div><div><span>Завершено</span><strong>${formatInt(node.sdo_completed)}</strong><small>из ${formatInt(node.sdo_started)} транзакций</small></div><div><span>Abort / timeout</span><strong>${formatInt(node.sdo_aborted)} / ${formatInt(node.sdo_timeouts)}</strong><small>явный отказ / нет ответа</small></div><div><span>Протокол</span><strong>${formatInt(node.sdo_protocol_errors)}</strong><small>нарушение последовательности</small></div><div><span>Без запроса</span><strong>${formatInt(node.sdo_orphans)}</strong><small>orphan-ответы</small></div><div><span>Конфликты</span><strong>${formatInt(node.sdo_conflicts)}</strong><small>неоднозначные транзакции</small></div>`;
 }
 
 async function selectNode(nodeId: number): Promise<void> {
   selectedNode = nodeId;
+  const result = $('nmt-result');
+  result.className = '';
+  result.textContent = 'Команда будет отправлена только выбранной ноде.';
   renderNodes(); renderNodeSummary();
   await loadNodeEvents(nodeId, true);
 }
 
+async function submitNmtCommand(): Promise<void> {
+  if (!selectedNode) return;
+  const nodeId = selectedNode;
+  const command = $<HTMLSelectElement>('nmt-command').value as NmtCommand;
+  if ((command === 'reset_node' || command === 'reset_communication') &&
+      !window.confirm(`${nmtCommandName(command)} для ноды ${nodeId}? Нода временно пропадёт с шины и может восстановить настройки из памяти.`)) return;
+
+  const button = $<HTMLButtonElement>('nmt-send');
+  const result = $('nmt-result');
+  button.disabled = true;
+  result.className = '';
+  result.textContent = `Отправка ${nmtCommandName(command)} ноде ${nodeId}…`;
+  try {
+    const accepted = await api<NmtAccepted>('/api/v1/can/nmt', {
+      method: 'POST',
+      body: JSON.stringify({ command, node_id: nodeId, confirmed: true })
+    });
+    result.className = 'ok';
+    result.textContent = `${nmtCommandName(command)} поставлена в очередь · seq #${accepted.sequence}`;
+    notify(`NMT ${nmtCommandName(command)} отправляется ноде ${nodeId}`);
+    await Promise.all([refreshTx(), refreshTxHistory()]);
+    window.setTimeout(() => { void refreshTx(); void refreshTxHistory(); void refreshNodes(); }, 350);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'NMT-команда не выполнена';
+    result.className = 'error';
+    result.textContent = message;
+    notify(message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function loadNodeEvents(nodeId: number, showError: boolean): Promise<void> {
   try {
-    const result = await api<{ items: NodeEvent[] }>(`/api/v1/snapshots/nodes/${nodeId}/${nodeView}?limit=64`);
+    const result = await api<{ kind: 'events'|'objects'; items: NodeEvent[] }>(`/api/v1/snapshots/nodes/${nodeId}/${nodeView}?limit=64`);
     const target = $('node-events');
     if (!result.items.length) { target.className = 'event-list empty-state'; target.textContent = 'Событий пока нет'; return; }
     target.className = 'event-list';
-    target.innerHTML = [...result.items].reverse().map(event => {
+    const items = result.kind === 'events' ? result.items : [...result.items].reverse();
+    target.innerHTML = items.map(event => {
       const object = event.has_sdo_address ? `0x${hex(event.index,4)}` : '—';
       const subindex = event.has_sdo_address ? hex(event.subindex,2) : '—';
       const data = describeSdoData(event);
@@ -742,6 +791,7 @@ async function resetStatistics(): Promise<void> {
     text('gap-blocks', '0');
     text('node-title', 'Выберите ноду');
     $('toggle-node-log').setAttribute('disabled', '');
+    $<HTMLFormElement>('nmt-form').hidden = true;
     $('node-summary').innerHTML = '';
     $('node-events').className = 'event-list empty-state';
     $('node-events').textContent = 'Здесь появятся события выбранной ноды';
@@ -798,6 +848,7 @@ function bindUi(): void {
     try { loggerConfig = await saveJson<LoggerConfig>('/api/v1/config/logger', body, 'Список нод обновлён'); renderNodes(); renderNodeSummary(); renderLoggerControls(); }
     catch { /* toast already shown */ }
   };
+  $<HTMLFormElement>('nmt-form').onsubmit = event => { event.preventDefault(); void submitNmtCommand(); };
   $<HTMLFormElement>('network-form').onsubmit = async event => {
     event.preventDefault();
     const body: NetworkConfig = { dhcp_enabled: $<HTMLInputElement>('dhcp-enabled').checked, static_ip: $<HTMLInputElement>('static-ip').value, netmask: $<HTMLInputElement>('netmask').value, gateway: $<HTMLInputElement>('gateway').value, http_port: Number($<HTMLInputElement>('http-port').value), dhcp_timeout_ms: Number($<HTMLInputElement>('dhcp-timeout').value) };

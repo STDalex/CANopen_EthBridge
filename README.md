@@ -15,7 +15,8 @@ ACK. Активная передача включается только явн�
   800 и 1000 кбит/с;
 - мониторинг Classic CAN с временными метками и оценкой загрузки шины;
 - анализ CANopen-узлов, NMT, PDO, EMCY и expedited SDO;
-- отправка адресных и broadcast-команд CANopen NMT через REST API;
+- отправка адресных и broadcast-команд CANopen NMT через REST API, а также
+  управление каждой обнаруженной нодой из Web-интерфейса;
 - чтение и запись expedited SDO через экран и REST API;
 - поток CAN-кадров через WebSocket;
 - управляемый CAN–Ethernet Bridge с одной клиентской сессией;

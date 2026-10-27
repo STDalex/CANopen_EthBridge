@@ -58,6 +58,23 @@
         </div>
         <aside class="panel node-detail">
           <div class="section-title"><div><span class="eyebrow">Статистика</span><h2 id="node-title">Выберите ноду</h2></div><button id="toggle-node-log" class="secondary" disabled>В лог</button></div>
+          <form id="nmt-form" class="nmt-control" hidden>
+            <div class="nmt-heading">
+              <div><span class="eyebrow">CANopen NMT</span><strong>Управление состоянием ноды</strong></div>
+              <span id="nmt-state" class="nmt-state">Состояние неизвестно</span>
+            </div>
+            <div class="nmt-fields">
+              <label>Команда<select id="nmt-command">
+                <option value="start">Start Remote Node</option>
+                <option value="pre_operational">Enter Pre-operational</option>
+                <option value="stop">Stop Remote Node</option>
+                <option value="reset_communication">Reset Communication</option>
+                <option value="reset_node">Reset Node</option>
+              </select></label>
+              <button id="nmt-send" type="submit">Отправить NMT</button>
+            </div>
+            <small id="nmt-result">Команда будет отправлена только выбранной ноде.</small>
+          </form>
           <div id="node-summary" class="detail-metrics"></div>
           <div class="subtabs"><button class="active" data-node-view="events">События</button><button data-node-view="objects">SDO объекты</button></div>
           <div class="event-head event-grid"><span>Время</span><span>Задержка</span><span>CAN ID</span><span>Тип</span><span>Объект</span><span>Sub</span><span>Значение / расшифровка</span><span>Результат</span></div>
