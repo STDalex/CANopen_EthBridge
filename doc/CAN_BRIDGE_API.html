@@ -339,11 +339,33 @@
         </div>
         <div class="code-tabs" data-code-tabs>
           <div class="code-tablist" role="tablist">
-            <button role="tab" aria-selected="true" data-code-tab="curl">REST / curl</button>
+            <button role="tab" aria-selected="true" data-code-tab="powershell">REST / PowerShell</button>
+            <button role="tab" aria-selected="false" data-code-tab="curl">REST / curl (Bash)</button>
             <button role="tab" aria-selected="false" data-code-tab="js">WebSocket / JS</button>
             <button role="tab" aria-selected="false" data-code-tab="python">CSWS / Python</button>
           </div>
-          <div class="code-panel active" data-code-panel="curl"><pre>BASE=http://192.168.1.7
+          <div class="code-panel active" data-code-panel="powershell"><pre>$base = 'http://192.168.1.7'
+
+# 1. Проверить состояние
+Invoke-RestMethod -Method Get `
+  -Uri "$base/api/v1/bridge/status"
+
+# 2. Включить Bridge и получить session_id
+$session = Invoke-RestMethod -Method Post `
+  -Uri "$base/api/v1/bridge/enable" `
+  -ContentType 'application/json' `
+  -Body '{}'
+$session.session_id
+
+# 3. В конце обязательно выключить Bridge
+Invoke-RestMethod -Method Post `
+  -Uri "$base/api/v1/bridge/disable" `
+  -ContentType 'application/json' `
+  -Body '{}'
+
+# Альтернатива: настоящий curl, обязательно с суффиксом .exe
+curl.exe -X GET "$base/api/v1/bridge/status" -H "accept: */*"</pre></div>
+          <div class="code-panel" data-code-panel="curl"><pre>BASE=http://192.168.1.7
 
 # 1. Получить session_id
 curl -sS -X POST "$BASE/api/v1/bridge/enable" \
@@ -482,6 +504,12 @@ except (SocketTimeout, ConnectionClosed, InvalidWebSocketFrame):
           <div class="eyebrow">07 · OpenAPI 3.1</div>
           <div><h2 id="swagger-title">REST API в Swagger UI</h2><p>Примеры запросов и ответов встроены в контракт. Адрес по умолчанию — <code>http://192.168.1.7</code>; его можно заменить в поле Servers.</p></div>
         </div>
+        <aside class="card callout" style="margin-bottom:14px">
+          <strong>Команды Swagger рассчитаны на Bash.</strong>
+          <p>В Windows PowerShell команда <code>curl</code> может быть псевдонимом <code>Invoke-WebRequest</code>, поэтому параметры <code>-X</code>/<code>-H</code> и перенос строки через <code>\</code> завершаются ошибкой. Используйте нативную команду:</p>
+          <pre style="margin:12px 0 0;overflow:auto;color:#d6e2e9;font-size:12px"><code>Invoke-RestMethod -Method Get -Uri 'http://192.168.1.7/api/v1/bridge/status'</code></pre>
+          <p style="margin-top:10px">Либо запускайте настоящий curl одной строкой: <code>curl.exe -X GET "http://192.168.1.7/api/v1/bridge/status" -H "accept: */*"</code>.</p>
+        </aside>
         <div class="swagger-shell">
           <div class="swagger-toolbar"><span>Swagger UI загружается с CDN; остальная документация полностью доступна без него.</span><button id="download-openapi" class="button secondary" type="button">Скачать OpenAPI JSON</button></div>
           <div id="swagger-ui"><div class="swagger-placeholder">Загрузка интерактивной спецификации…</div></div>
@@ -592,9 +620,54 @@ except (SocketTimeout, ConnectionClosed, InvalidWebSocketFrame):
       setTimeout(() => URL.revokeObjectURL(link.href), 1000);
     });
 
+    // Swagger UI resolves JSON Pointer references against window.location.
+    // When this standalone document is opened through file://, that turns a
+    // local reference such as #/components/schemas/Error into a file URI and
+    // the resolver rejects it. Feed Swagger a dereferenced copy while keeping
+    // the downloadable OpenAPI document canonical and reusable by other tools.
+    function dereferenceLocalRefs(document) {
+      const root = JSON.parse(JSON.stringify(document));
+
+      function resolvePointer(reference) {
+        if (!reference.startsWith("#/")) return null;
+        return reference.slice(2).split("/").reduce((value, token) => {
+          const key = token.replace(/~1/g, "/").replace(/~0/g, "~");
+          return value && Object.prototype.hasOwnProperty.call(value, key)
+            ? value[key]
+            : undefined;
+        }, root);
+      }
+
+      function visit(value, resolving = new Set()) {
+        if (Array.isArray(value)) return value.map((item) => visit(item, resolving));
+        if (!value || typeof value !== "object") return value;
+
+        if (typeof value.$ref === "string" && value.$ref.startsWith("#/")) {
+          if (resolving.has(value.$ref)) {
+            throw new Error(`Circular OpenAPI reference: ${value.$ref}`);
+          }
+          const target = resolvePointer(value.$ref);
+          if (target === undefined) {
+            throw new Error(`Unknown OpenAPI reference: ${value.$ref}`);
+          }
+          const next = new Set(resolving);
+          next.add(value.$ref);
+          const siblings = { ...value };
+          delete siblings.$ref;
+          return { ...visit(target, next), ...visit(siblings, next) };
+        }
+
+        return Object.fromEntries(
+          Object.entries(value).map(([key, item]) => [key, visit(item, resolving)])
+        );
+      }
+
+      return visit(root);
+    }
+
     if (typeof SwaggerUIBundle === "function") {
       SwaggerUIBundle({
-        spec: openapi,
+        spec: dereferenceLocalRefs(openapi),
         dom_id: "#swagger-ui",
         deepLinking: true,
         displayRequestDuration: true,
