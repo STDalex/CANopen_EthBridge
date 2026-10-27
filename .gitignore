@@ -29,6 +29,10 @@ Web/node_modules/
 Web/build/
 Web/dist/
 
+# CMake / GNU Arm build output
+/build/
+/cmake-build-*/
+
 # Editor, Python, and operating-system files
 .vscode/
 .idea/
