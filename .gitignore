@@ -1,0 +1,41 @@
+# Keil MDK build output and per-user state
+**/MDK-ARM/*/
+**/Objects/
+**/Listings/
+*.uvguix.*
+*.log
+*.dep
+*.d
+*.o
+*.obj
+*.axf
+*.elf
+*.hex
+*.bin
+*.map
+*.lnp
+*.htm
+*.crf
+
+# Runtime diagnostics and framebuffer captures
+runtime_capture/
+**/MDK-ARM/*.png
+
+# Generated desktop-analyzer build workspace
+log_analyzer/build/
+
+# Embedded Web application build output
+Web/node_modules/
+Web/build/
+Web/dist/
+
+# Editor, Python, and operating-system files
+.vscode/
+.idea/
+*.user
+*.tmp
+*.bak
+Thumbs.db
+.DS_Store
+__pycache__/
+*.py[cod]
