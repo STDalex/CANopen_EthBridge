@@ -16,7 +16,7 @@
   <main>
     <section class="metrics" aria-label="Состояние устройства">
       <article><span>Скорость CAN</span><strong id="can-rate">—</strong><small id="can-state">ожидание</small></article>
-      <article><span>Загрузка шины</span><strong id="bus-load">—</strong><small class="metric-details"><span id="traffic-total">0 кадров</span><span>CAN LOSS <b id="can-loss">0</b></span><span>DISPLAY SKIP <b id="display-skips">0</b></span><span>ANALYZER LOSS <b id="analyzer-loss">0</b></span><span>ERR <b id="can-errors">0</b></span></small></article>
+      <article><span>Загрузка шины</span><strong id="bus-load">—</strong><small class="metric-details"><span id="traffic-total">0 кадров</span><span>CAN LOSS <b id="can-loss">0</b></span><span>ANALYZER LOSS <b id="analyzer-loss">0</b></span><span>ERR <b id="can-errors">0</b></span></small></article>
       <article><span>Запись</span><strong id="log-mode">—</strong><small><span id="log-file">нет файла</span> · свободно <span id="log-free">—</span></small></article>
       <article><span>Live stream</span><strong id="live-rate">0 кадр/с</strong><small class="metric-details"><span>WEB MISSED <b id="gap-count">0</b></span><span>WEB GAPS <b id="gap-blocks">0</b></span></small></article>
     </section>
@@ -136,6 +136,17 @@
           <div id="tx-statistics" class="detail-metrics tx-metrics"></div>
         </aside>
       </div>
+      <div class="panel sdo-recent-panel">
+        <div class="section-title">
+          <div><span class="eyebrow">QSPI · последние 10 уникальных</span><h2>История SDO-запросов</h2></div>
+          <button id="refresh-sdo-history" type="button" class="ghost" aria-label="Обновить историю SDO">Обновить</button>
+        </div>
+        <p class="sdo-recent-hint">Выберите сохранённый запрос, чтобы заполнить форму. Передача автоматически не запускается.</p>
+        <div class="sdo-recent-picker">
+          <label for="sdo-request-history">Сохранённый запрос</label>
+          <select id="sdo-request-history" disabled><option value="">Сохранённых запросов пока нет</option></select>
+        </div>
+      </div>
       <div class="panel tx-history-panel">
         <div class="section-title"><div><span class="eyebrow">TX journal</span><h2>Последние результаты</h2></div><button id="refresh-tx-history" type="button" class="ghost">Обновить</button></div>
         <div class="tx-history-head tx-history-grid"><span>Seq</span><span>Время</span><span>Node</span><span>Операция</span><span>Объект</span><span>Sub</span><span>Значение / raw</span><span>Результат</span></div>
@@ -201,12 +212,11 @@
           <h3>Потери, пропуски и разрывы</h3>
           <dl class="help-definitions">
             <div><dt>CAN LOSS</dt><dd>Кадры, потерянные до обработки всей системой: переполнилось входное программное кольцо или аппаратный FIFO CAN. Такой кадр не увидят анализатор, логгер, экран и WebSocket.</dd></div>
-            <div><dt>DISPLAY SKIP</dt><dd>Кадр принят, но очередь физического экрана STM32 была заполнена. Это допустимая потеря визуализации; анализатор, логгер и WebSocket продолжают работать.</dd></div>
             <div><dt>ANALYZER LOSS</dt><dd>Кадр принят, но не попал в CANopen-анализатор из-за заполненной очереди. Raw-кадр при этом мог быть записан или передан в браузер.</dd></div>
             <div><dt>WEB MISSED</dt><dd>Число отдельных кадров, отсутствующих в последовательности WebSocket браузера. Они могли остаться в анализаторе или на microSD.</dd></div>
             <div><dt>WEB GAPS</dt><dd>Число эпизодов разрыва последовательности. Если после SEQ 100 пришёл SEQ 110, это один разрыв и девять пропущенных кадров. Переподключение браузера также может создать разрыв.</dd></div>
           </dl>
-          <div class="help-note"><strong>Главный показатель сохранности — CAN LOSS.</strong> Рост DISPLAY SKIP не означает потери на шине. Для гарантированного хранения полного потока включайте запись на microSD и дополнительно контролируйте счётчик потерянных кадров логгера.</div>
+          <div class="help-note"><strong>Главный показатель сохранности — CAN LOSS.</strong> Физический дисплей выбирает последние кадры из циклического буфера 20 раз в секунду, поэтому его частота перерисовки не влияет на счётчики потерь. Для гарантированного хранения полного потока включайте запись на microSD и дополнительно контролируйте счётчик потерянных кадров логгера.</div>
           <p>Загрузка шины оценивается по скорости, формату, DLC и ожидаемому bit stuffing за последнюю секунду. Это полезная оценка, а не измерение осциллографом.</p>
         </article>
 
@@ -238,6 +248,7 @@
           </div>
           <p>Expedited SDO переносит до четырёх байт непосредственно в кадре. Segmented и block transfer состоят из нескольких кадров. Значение показывается вместе с raw-байтами, чтобы можно было проверить размер и порядок байт.</p>
           <div class="help-note"><strong>TX journal.</strong> Для локального SDO запрос <code>REQ</code> и ответ <code>RESP</code> имеют общий SEQ. В ответе показаны raw-данные, задержка и расшифровка Abort. NMT не имеет непосредственного ответа и отображается одной строкой.</div>
+          <div class="help-note"><strong>История SDO-запросов.</strong> Последние 10 уникальных запросов из веб-формы и экранного клиента сохраняются в двух защищённых CRC-копиях в QSPI. Повтор переносится наверх без создания дубля. Выбор записи только заполняет форму — для отправки всё равно требуется отдельное нажатие.</div>
         </article>
 
         <article id="help-bitrate" class="panel help-card">

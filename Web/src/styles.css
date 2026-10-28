@@ -160,6 +160,11 @@ h2 { font-size: 17px; margin: 2px 0 0; }
 .tx-mode-status.periodic .dot { background: var(--violet); box-shadow: 0 0 0 4px #c084fc22, 0 0 18px #c084fc88; }
 .tx-mode-status.pending .dot { background: var(--amber); }
 .tx-metrics { grid-template-columns: repeat(2, 1fr); border-top: 1px solid var(--line); }
+.sdo-recent-panel { margin-bottom: 12px; overflow: hidden; }
+.sdo-recent-hint { margin: -4px 18px 14px; color: var(--muted); font-size: 12px; }
+.sdo-recent-picker { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; align-items: center; padding: 0 18px 18px; }
+.sdo-recent-picker label { color: var(--muted); font-size: 12px; }
+.sdo-recent-picker select { width: 100%; font-family: ui-monospace, Consolas, monospace; }
 .tx-history-panel { overflow-x: auto; }
 .tx-history-head { height: 34px; padding: 0 18px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; border-bottom: 1px solid var(--line); }
 .tx-history-grid { display: grid; grid-template-columns: 64px 110px 90px 70px 70px 42px minmax(160px, 1fr) 130px; gap: 9px; align-items: center; min-width: 800px; }
@@ -228,6 +233,7 @@ h2 { font-size: 17px; margin: 2px 0 0; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .settings-grid { grid-template-columns: 1fr; }
   .tx-layout { grid-template-columns: 1fr; }
+  .sdo-recent-picker { grid-template-columns: 1fr; gap: 6px; }
   .error-layout { grid-template-columns: 1fr; }
   .error-counter-grid { grid-template-columns: repeat(2, 1fr); }
   .tx-fields { grid-template-columns: repeat(2, 1fr) !important; }

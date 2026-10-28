@@ -15,6 +15,7 @@
 #include "main.h"
 #include "memory_layout.h"
 #include "network_service.h"
+#include "sdo_history.h"
 #include "task.h"
 #include "web_assets.h"
 
@@ -1767,7 +1768,8 @@ static void HandleRoot(struct netconn *connection)
     "\"/api/v1/config/network\",\"/api/v1/config/can\","
     "\"/api/v1/config/logger\","
     "\"/api/v1/can/mode\",\"/api/v1/can/nmt\",\"/api/v1/can/tx\","
-    "\"/api/v1/can/tx/history\",\"/api/v1/can/tx/periodic\","
+    "\"/api/v1/can/tx/history\",\"/api/v1/can/sdo/history\","
+    "\"/api/v1/can/tx/periodic\","
     "\"/api/v1/bridge/enable\",\"/api/v1/bridge/disable\","
     "\"/api/v1/bridge/status\",\"/api/v1/bridge\","
     "\"/api/v1/logger/start\",\"/api/v1/logger/stop\","
@@ -1782,7 +1784,8 @@ static void HandleRoot(struct netconn *connection)
            "\"/api/v1/config/network\",\"/api/v1/config/can\","
            "\"/api/v1/config/logger\","
            "\"/api/v1/can/mode\",\"/api/v1/can/nmt\",\"/api/v1/can/tx\","
-           "\"/api/v1/can/tx/history\",\"/api/v1/can/tx/periodic\","
+           "\"/api/v1/can/tx/history\",\"/api/v1/can/sdo/history\","
+           "\"/api/v1/can/tx/periodic\","
            "\"/api/v1/bridge/enable\",\"/api/v1/bridge/disable\","
            "\"/api/v1/bridge/status\",\"/api/v1/bridge\","
            "\"/api/v1/logger/start\",\"/api/v1/logger/stop\","
@@ -2173,6 +2176,7 @@ static void HandleCanTxPost(struct netconn *connection, const char *body)
   JsonWriter writer;
   CanTxSdoRequest request = {0};
   CanTxSubmitResult result;
+  bool history_saved;
   uint32_t value;
   uint32_t sequence;
   uint32_t period_ms = 0U;
@@ -2275,12 +2279,14 @@ static void HandleCanTxPost(struct netconn *connection, const char *body)
                                 "The bounded CAN transmit queue is full");
     return;
   }
+  history_saved = SdoHistory_Remember(&request);
   WriterBegin(&writer, connection, "202 Accepted");
   WriterPrintf(&writer,
-               "{\"sequence\":%lu,\"status\":\"%s\",\"period_ms\":%lu}\n",
+               "{\"sequence\":%lu,\"status\":\"%s\",\"period_ms\":%lu,"
+               "\"history_saved\":%s}\n",
                (unsigned long)sequence,
                period_ms != 0U ? "periodic" : "queued",
-               (unsigned long)period_ms);
+               (unsigned long)period_ms, history_saved ? "true" : "false");
   WriterEnd(&writer);
 }
 
@@ -2350,6 +2356,33 @@ static void HandleCanTxCancel(struct netconn *connection, uint32_t sequence)
   WriterBegin(&writer, connection, "202 Accepted");
   WriterPrintf(&writer, "{\"sequence\":%lu,\"status\":\"cancelling\"}\n",
                (unsigned long)sequence);
+  WriterEnd(&writer);
+}
+
+static void HandleSdoRequestHistory(struct netconn *connection)
+{
+  JsonWriter writer;
+  CanTxSdoRequest requests[SDO_HISTORY_CAPACITY];
+  size_t count = SdoHistory_Copy(requests, SDO_HISTORY_CAPACITY);
+  size_t index;
+
+  WriterBegin(&writer, connection, "200 OK");
+  WriterPrintf(&writer, "{\"count\":%lu,\"items\":[", (unsigned long)count);
+  for (index = 0U; index < count; ++index)
+  {
+    const CanTxSdoRequest *request = &requests[index];
+    WriterPrintf(&writer,
+                 "%s{\"node_id\":%u,\"command\":\"%s\","
+                 "\"index\":%u,\"subindex\":%u,\"value\":%lu,"
+                 "\"timeout_ms\":%u}",
+                 index == 0U ? "" : ",", (unsigned int)request->node_id,
+                 CanTx_SdoCommandName(request->command),
+                 (unsigned int)request->index,
+                 (unsigned int)request->subindex,
+                 (unsigned long)request->value,
+                 (unsigned int)request->timeout_ms);
+  }
+  WriterChunk(&writer, "]}\n", 3U);
   WriterEnd(&writer);
 }
 
@@ -3249,6 +3282,9 @@ static bool Dispatch(struct netconn *connection, char *request)
   else if ((strcmp(method, "GET") == 0) &&
            (strcmp(path, "/api/v1/can/tx/history") == 0))
     HandleCanTxHistory(connection);
+  else if ((strcmp(method, "GET") == 0) &&
+           (strcmp(path, "/api/v1/can/sdo/history") == 0))
+    HandleSdoRequestHistory(connection);
   else if ((strcmp(method, "DELETE") == 0) &&
            (strcmp(path, "/api/v1/can/tx/periodic") == 0))
     HandleCanTxPeriodicStop(connection);
