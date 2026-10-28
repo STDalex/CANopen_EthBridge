@@ -34,6 +34,18 @@ typedef struct
   bool enabled;
 } CanTxPeriodicState;
 
+typedef struct
+{
+  CanTxSdoRequest request;
+  CanFrameRecord response;
+  uint32_t sequence;
+  uint32_t request_timestamp_us;
+  uint32_t response_time_us;
+  bool used;
+  bool waiting;
+  bool has_response;
+} CanTxResponseCorrelation;
+
 static StaticQueue_t tx_queue_control;
 static uint8_t tx_queue_storage[CAN_TX_QUEUE_CAPACITY * sizeof(CanTxQueueEntry)];
 static QueueHandle_t tx_queue;
@@ -50,6 +62,7 @@ static CanTxStatus public_status;
 static CanTxPeriodicState periodic_state;
 static CanTxHistoryEntry periodic_history;
 static bool periodic_history_valid;
+static CanTxResponseCorrelation response_correlations[CAN_TX_QUEUE_CAPACITY];
 static uint32_t auto_silent_deadline;
 static bool auto_silent_armed;
 static CanTxOwner tx_owner;
@@ -97,6 +110,100 @@ static bool ConsumeCancellation(uint32_t sequence)
   return cancelled;
 }
 
+static CanTxHistoryEntry *FindHistoryLocked(uint32_t sequence)
+{
+  uint32_t age;
+  if (periodic_history_valid && (periodic_history.sequence == sequence))
+    return &periodic_history;
+  for (age = 0U; age < history_count; ++age)
+  {
+    uint32_t source = (history_write - 1U - age) % CAN_TX_HISTORY_CAPACITY;
+    if (history[source].sequence == sequence) return &history[source];
+  }
+  return NULL;
+}
+
+static CanTxResponseCorrelation *FindCorrelationLocked(uint32_t sequence)
+{
+  uint32_t index;
+  for (index = 0U; index < CAN_TX_QUEUE_CAPACITY; ++index)
+  {
+    if (response_correlations[index].used &&
+        (response_correlations[index].sequence == sequence))
+      return &response_correlations[index];
+  }
+  return NULL;
+}
+
+static void ApplyResponseLocked(uint32_t sequence,
+                                const CanTxResponseCorrelation *correlation)
+{
+  CanTxHistoryEntry *entry;
+  if ((correlation == NULL) || !correlation->has_response) return;
+  entry = FindHistoryLocked(sequence);
+  if (entry == NULL) return;
+  entry->response = correlation->response;
+  entry->response_time_us = correlation->response_time_us;
+  entry->has_response = true;
+}
+
+static void ArmResponseCorrelation(const CanTxQueueEntry *entry,
+                                   uint32_t request_timestamp_us)
+{
+  CanTxSdoRequest request;
+  CanTxResponseCorrelation *slot = NULL;
+  CanTxResponseCorrelation *oldest = NULL;
+  uint32_t index;
+  uint32_t oldest_age = 0U;
+  if ((entry == NULL) || !CanTx_DecodeSdoRequest(&entry->frame, &request)) return;
+
+  taskENTER_CRITICAL();
+  slot = FindCorrelationLocked(entry->sequence);
+  for (index = 0U; (slot == NULL) && (index < CAN_TX_QUEUE_CAPACITY); ++index)
+  {
+    CanTxResponseCorrelation *candidate = &response_correlations[index];
+    uint32_t age = request_timestamp_us - candidate->request_timestamp_us;
+    if (!candidate->used ||
+        (candidate->waiting &&
+         (age > ((uint32_t)candidate->request.timeout_ms * 1000U))))
+    {
+      slot = candidate;
+      break;
+    }
+    if ((oldest == NULL) || (age > oldest_age))
+    {
+      oldest_age = age;
+      oldest = candidate;
+    }
+  }
+  if (slot == NULL) slot = oldest;
+  if (slot != NULL)
+  {
+    memset(slot, 0, sizeof(*slot));
+    slot->request = request;
+    slot->sequence = entry->sequence;
+    slot->request_timestamp_us = request_timestamp_us;
+    slot->used = true;
+    slot->waiting = true;
+  }
+  taskEXIT_CRITICAL();
+}
+
+static void FinishResponseCorrelationLocked(uint32_t sequence, CanTxResult result)
+{
+  CanTxResponseCorrelation *correlation = FindCorrelationLocked(sequence);
+  CanTxHistoryEntry *entry;
+  if (correlation == NULL) return;
+  if (result != CAN_TX_RESULT_SENT)
+  {
+    memset(correlation, 0, sizeof(*correlation));
+    return;
+  }
+  entry = FindHistoryLocked(sequence);
+  if (entry != NULL) entry->timestamp_us = correlation->request_timestamp_us;
+  ApplyResponseLocked(sequence, correlation);
+}
+
 static void RecordResult(const CanTxQueueEntry *entry, CanTxResult result)
 {
   CanTxHistoryEntry *stored;
@@ -130,6 +237,7 @@ static void RecordResult(const CanTxQueueEntry *entry, CanTxResult result)
   stored->timestamp_us = CanCapture_GetTimestampUs();
   stored->frame = entry->frame;
   stored->result = result;
+  FinishResponseCorrelationLocked(entry->sequence, result);
   public_status.last_sequence = entry->sequence;
   public_status.last_result = result;
   public_status.transmitting = false;
@@ -185,6 +293,7 @@ static CanTxResult Transmit(const CanTxQueueEntry *entry)
   if (entry->frame.extended) local_frame.flags |= CAN_FRAME_FLAG_EXTENDED;
   if (entry->frame.remote) local_frame.flags |= CAN_FRAME_FLAG_REMOTE;
   memcpy(local_frame.data, entry->frame.data, sizeof(local_frame.data));
+  ArmResponseCorrelation(entry, local_frame.timestamp_us);
   (void)CanPipeline_PublishLocalTx(&local_frame);
 
   shift = MailboxShift(mailbox);
@@ -247,6 +356,7 @@ void CanTxManager_Init(void)
   memset(&periodic_state, 0, sizeof(periodic_state));
   memset(&periodic_history, 0, sizeof(periodic_history));
   periodic_history_valid = false;
+  memset(response_correlations, 0, sizeof(response_correlations));
   auto_silent_deadline = 0U;
   auto_silent_armed = false;
   tx_owner = CAN_TX_OWNER_NORMAL;
@@ -647,6 +757,49 @@ void CanTx_CancelAll(void)
   cancel_all_requested = true;
 }
 
+void CanTx_ObserveRxFrame(const CanFrameRecord *frame)
+{
+  CanTxResponseCorrelation *match = NULL;
+  uint32_t node_id;
+  uint16_t object_index;
+  uint8_t subindex;
+  uint32_t index;
+  if ((frame == NULL) || ((frame->flags & CAN_FRAME_FLAG_LOCAL_TX) != 0U) ||
+      ((frame->flags & (CAN_FRAME_FLAG_EXTENDED | CAN_FRAME_FLAG_REMOTE)) != 0U) ||
+      (frame->id < 0x581U) || (frame->id > 0x5FFU) || (frame->dlc < 4U))
+    return;
+
+  node_id = frame->id - 0x580U;
+  object_index = (uint16_t)frame->data[1] | ((uint16_t)frame->data[2] << 8U);
+  subindex = frame->data[3];
+  taskENTER_CRITICAL();
+  for (index = 0U; index < CAN_TX_QUEUE_CAPACITY; ++index)
+  {
+    CanTxResponseCorrelation *candidate = &response_correlations[index];
+    uint32_t elapsed;
+    if (!candidate->used || !candidate->waiting ||
+        (candidate->request.node_id != node_id) ||
+        (candidate->request.index != object_index) ||
+        (candidate->request.subindex != subindex))
+      continue;
+    elapsed = frame->timestamp_us - candidate->request_timestamp_us;
+    if (elapsed > ((uint32_t)candidate->request.timeout_ms * 1000U)) continue;
+    if ((match == NULL) ||
+        ((int32_t)(candidate->request_timestamp_us -
+                   match->request_timestamp_us) > 0))
+      match = candidate;
+  }
+  if (match != NULL)
+  {
+    match->response = *frame;
+    match->response_time_us = frame->timestamp_us - match->request_timestamp_us;
+    match->has_response = true;
+    match->waiting = false;
+    ApplyResponseLocked(match->sequence, match);
+  }
+  taskEXIT_CRITICAL();
+}
+
 void CanTx_GetStatus(CanTxStatus *status)
 {
   if (status == NULL) return;
@@ -677,6 +830,7 @@ void CanTx_ResetStatistics(void)
   memset(history, 0, sizeof(history));
   memset(&periodic_history, 0, sizeof(periodic_history));
   periodic_history_valid = false;
+  memset(response_correlations, 0, sizeof(response_correlations));
   taskEXIT_CRITICAL();
 }
 

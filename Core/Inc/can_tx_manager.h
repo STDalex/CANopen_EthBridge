@@ -1,6 +1,8 @@
 #ifndef CAN_TX_MANAGER_H
 #define CAN_TX_MANAGER_H
 
+#include "can_capture.h"
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -74,8 +76,11 @@ typedef struct
   uint32_t sequence;
   uint32_t timestamp_us;
   CanTxFrame frame;
+  CanFrameRecord response;
+  uint32_t response_time_us;
   CanTxResult result;
   uint32_t attempt_count;
+  bool has_response;
   bool periodic;
 } CanTxHistoryEntry;
 
@@ -122,6 +127,7 @@ CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
 bool CanTx_StopPeriodic(void);
 bool CanTx_Cancel(uint32_t sequence);
 void CanTx_CancelAll(void);
+void CanTx_ObserveRxFrame(const CanFrameRecord *frame);
 void CanTx_GetStatus(CanTxStatus *status);
 void CanTx_ResetStatistics(void);
 size_t CanTx_CopyHistory(CanTxHistoryEntry *entries, size_t capacity);

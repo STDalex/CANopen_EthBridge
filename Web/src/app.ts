@@ -19,7 +19,8 @@ type SdoCommand = 'read' | 'write_u8' | 'write_u16' | 'write_u24' | 'write_u32';
 type NmtCommand = 'start' | 'stop' | 'pre_operational' | 'reset_node' | 'reset_communication';
 interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean; bridge_active: boolean }
 interface CanTxStatus { queue_depth: number; queue_capacity: number; transmitting: boolean; queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number; last_sequence: number; last_result: string; rate_limit_fps: number; periodic_active: boolean; periodic_sequence: number; periodic_period_ms: number; periodic_attempts: number }
-interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; type?: 'nmt'; node_id: number; command: SdoCommand | NmtCommand; index?: number; subindex?: number; value?: number; can_id: number; raw: number[]; timeout_ms: number }
+interface CanTxResponse { timestamp_us: number; response_time_us: number; can_id: number; dlc: number; raw: number[] }
+interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; type?: 'nmt'; node_id: number; command: SdoCommand | NmtCommand; index?: number; subindex?: number; value?: number; can_id: number; raw: number[]; timeout_ms: number; has_response?: boolean; response?: CanTxResponse }
 interface NmtAccepted { sequence: number; status: 'queued'; command: NmtCommand; node_id: number }
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -397,7 +398,18 @@ async function refreshTxHistory(showError = false): Promise<void> {
       const attempts = entry.periodic ? `<small>× ${formatInt(entry.attempt_count)}</small>` : '';
       const index = isNmt || entry.index === undefined ? '—' : `0x${hex(entry.index, 4)}`;
       const subindex = isNmt || entry.subindex === undefined ? '—' : `0x${hex(entry.subindex, 2)}`;
-      return `<div class="tx-history-row tx-history-grid${entry.periodic ? ' periodic' : ''}"><span>${entry.periodic ? '↻ ' : ''}#${entry.sequence}</span><span>${formatTime(entry.timestamp_us)}</span><span>${entry.node_id || 'ALL'}</span><span>${escapeHtml(command)}</span><span>${index}</span><span>${subindex}</span><span>${value}${attempts}</span><span class="tx-result-${escapeHtml(entry.result)}">${escapeHtml(txResultName(entry.result))}</span></div>`;
+      const request = `<div class="tx-history-row tx-history-grid${entry.periodic ? ' periodic' : ''}${isNmt ? '' : ' paired'}"><span>${entry.periodic ? '↻ ' : ''}#${entry.sequence}</span><span>${formatTime(entry.timestamp_us)}</span><span>${entry.node_id || 'ALL'}</span><span>${escapeHtml(command)}${isNmt ? '' : '<small>REQ</small>'}</span><span>${index}</span><span>${subindex}</span><span>${value}${attempts}</span><span class="tx-result-${escapeHtml(entry.result)}">${escapeHtml(txResultName(entry.result))}</span></div>`;
+      if (isNmt) return request;
+      if (!entry.has_response || !entry.response) {
+        const missing = entry.result === 'sent' ? 'Нет ответа' : 'Запрос не отправлен';
+        return `${request}<div class="tx-history-row tx-history-grid response missing"><span>#${entry.sequence}</span><span>—</span><span>${entry.node_id}</span><span>RESP</span><span>${index}</span><span>${subindex}</span><span>—</span><span>${missing}</span></div>`;
+      }
+      const response = entry.response;
+      const raw = response.raw.map(byte => hex(byte, 2)).join(' ');
+      const abort = response.raw[0] === 0x80 && response.raw.length >= 8 ? littleEndianValue(response.raw.slice(4, 8)) : 0;
+      const responseResult = abort ? `${sdoAbortName(abort)} · 0x${hex(abort, 8)}` : 'Ответ получен';
+      const responseClass = abort ? ' abort' : '';
+      return `${request}<div class="tx-history-row tx-history-grid response${responseClass}"><span>#${entry.sequence}</span><span>${formatTime(response.timestamp_us)}<small>+${formatInt(response.response_time_us)} мкс</small></span><span>${entry.node_id}</span><span>RESP</span><span>${index}</span><span>${subindex}</span><span>${raw}</span><span>${escapeHtml(responseResult)}</span></div>`;
     }).join('');
   } catch (error) {
     if (showError) notify(error instanceof Error ? error.message : 'Журнал TX недоступен', true);

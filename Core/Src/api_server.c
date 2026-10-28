@@ -1637,6 +1637,27 @@ static void WriteTxFrame(JsonWriter *writer, const CanTxFrame *frame)
   WriterPrintf(writer, "],\"timeout_ms\":%u", (unsigned int)request.timeout_ms);
 }
 
+static void WriteTxResponse(JsonWriter *writer, const CanTxHistoryEntry *entry)
+{
+  uint32_t index;
+  WriterPrintf(writer, ",\"has_response\":%s",
+               entry->has_response ? "true" : "false");
+  if (!entry->has_response) return;
+  WriterPrintf(writer,
+               ",\"response\":{\"timestamp_us\":%lu,\"response_time_us\":%lu,"
+               "\"can_id\":%lu,\"dlc\":%u,\"raw\":[",
+               (unsigned long)entry->response.timestamp_us,
+               (unsigned long)entry->response_time_us,
+               (unsigned long)entry->response.id,
+               (unsigned int)entry->response.dlc);
+  for (index = 0U; (index < entry->response.dlc) && (index < 8U); ++index)
+  {
+    WriterPrintf(writer, "%s%u", index == 0U ? "" : ",",
+                 (unsigned int)entry->response.data[index]);
+  }
+  WriterChunk(writer, "]}", 2U);
+}
+
 static const char *SdoStatusName(CanopenSdoStatus status)
 {
   switch (status)
@@ -2244,6 +2265,7 @@ static void HandleCanTxHistory(struct netconn *connection)
                  entry->periodic ? "true" : "false",
                  (unsigned long)entry->attempt_count);
     WriteTxFrame(&writer, &entry->frame);
+    WriteTxResponse(&writer, entry);
     WriterChunk(&writer, "}", 1U);
   }
   WriterChunk(&writer, "]}\n", 3U);

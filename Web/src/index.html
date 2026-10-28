@@ -28,6 +28,7 @@
       <button id="tx-tab-button" data-tab="transmit">Передача <span id="tx-mode-badge" class="badge" hidden>ТАЙМЕР</span></button>
       <button data-tab="errors">Ошибки CAN</button>
       <button data-tab="settings">Настройки</button>
+      <button data-tab="help">Справка</button>
       <button id="reset-statistics" class="reset-action" type="button">Сбросить статистику</button>
     </nav>
 
@@ -174,6 +175,120 @@
           <label class="check"><input id="deep-sdo" type="checkbox"><span>Глубокий анализ SDO</span></label>
           <button type="submit">Сохранить CAN</button>
         </form>
+      </div>
+    </section>
+
+    <section id="tab-help" class="tab help-page">
+      <div class="panel help-intro">
+        <div><span class="eyebrow">CanSniff · встроенная справка</span><h2>Как читать данные CAN и CANopen</h2></div>
+        <p>Справка описывает те же режимы, что и экран устройства, но подробнее. Все времена отсчитываются от запуска моста. Числа CAN ID и Object Dictionary обычно записаны в шестнадцатеричном виде.</p>
+        <nav class="help-nav" aria-label="Разделы справки">
+          <a href="#help-monitor">Монитор</a><a href="#help-nodes">Ноды</a><a href="#help-objects">Объекты</a><a href="#help-bitrate">Скорость</a><a href="#help-packets">Пакеты</a><a href="#help-errors">Ошибки</a>
+        </nav>
+      </div>
+
+      <div class="help-grid">
+        <article id="help-monitor" class="panel help-card">
+          <span class="eyebrow">01 · Монитор</span><h2>Поток CAN-кадров</h2>
+          <p>Вкладка «Поток» показывает кадры, полученные контроллером CAN, и локальные кадры, переданные самим мостом. Поток приходит в браузер через WebSocket и не зависит от REST-запросов.</p>
+          <dl class="help-definitions">
+            <div><dt>Время</dt><dd>Метка в секундах от запуска. Она удобна для измерения периода и задержки, но не является календарным временем.</dd></div>
+            <div><dt>CAN ID</dt><dd>11-битный STD или 29-битный EXT идентификатор. Меньшее числовое значение имеет больший приоритет при арбитраже.</dd></div>
+            <div><dt>FMT</dt><dd><code>STD</code>/<code>EXT</code>, а также <code>RTR</code> для remote frame. Локальная передача выделяется отдельно.</dd></div>
+            <div><dt>DLC и данные</dt><dd>Количество байт и содержимое кадра в порядке передачи. Многобайтные значения CANopen обычно имеют порядок LSB first.</dd></div>
+          </dl>
+          <p><strong>Пауза</strong> останавливает только перерисовку таблицы — приём CAN продолжается. «Очистить» удаляет браузерный буфер, но не сбрасывает аппаратную статистику.</p>
+          <div class="help-note"><strong>DROP и разрывы.</strong> DROP означает переполнение очередей устройства; «пропущено» и «разрывы» относятся к WebSocket-потоку браузера. Кадры могли быть приняты анализатором или записаны на SD, но не успеть попасть на экран.</div>
+          <p>Загрузка шины оценивается по скорости, формату, DLC и ожидаемому bit stuffing за последнюю секунду. Это полезная оценка, а не измерение осциллографом.</p>
+        </article>
+
+        <article id="help-nodes" class="panel help-card">
+          <span class="eyebrow">02 · Ноды</span><h2>Обнаруженные CANopen-устройства</h2>
+          <p>Нода появляется, когда CAN ID кадра попадает в стандартный диапазон CANopen и из него можно определить Node ID 1…127. Таблица показывает последний кадр, число кадров, долю трафика, SDO-статистику и последний тип сообщения.</p>
+          <ul>
+            <li><strong>Трафик</strong> — доля кадров ноды среди кадров, обработанных анализатором.</li>
+            <li><strong>SDO % в Basic</strong> — отношение наблюдавшихся SDO-ответов к запросам; это приблизительная оценка.</li>
+            <li><strong>SDO % в Deep</strong> — доля завершённых транзакций среди успешных, Abort, timeout и protocol error. Конфликты и orphan-ответы помечают результат как неоднозначный.</li>
+            <li><strong>В лог</strong> добавляет ноду в выборочный режим записи на microSD.</li>
+          </ul>
+          <h3>NMT-состояние</h3>
+          <p><code>BOOT</code>, <code>OP</code>, <code>PRE</code> и <code>STOP</code> берутся только из Boot-up/Heartbeat/Node Guarding. <code>--</code> означает, что после запуска моста такого кадра не было. Приход TPDO косвенно указывает на рабочую ноду, но не заменяет достоверный Heartbeat.</p>
+          <p><code>TX</code> — временный статус самого моста: NMT-команда поставлена на передачу. Это не состояние ноды. Для постоянного контроля включите Producer Heartbeat через объект <code>0x1017:00</code>.</p>
+        </article>
+
+        <article id="help-objects" class="panel help-card">
+          <span class="eyebrow">03 · Объекты</span><h2>События и SDO Object Dictionary</h2>
+          <p>«События» показывают последние кадры выбранной ноды, начиная с самого нового. «SDO объекты» оставляют последнее известное обращение для каждой комбинации index, subindex и направления.</p>
+          <div class="help-status-grid">
+            <div><code>OK</code><span>Транзакция завершена корректно.</span></div>
+            <div><code>WAIT</code><span>Запрос замечен, ответ ещё ожидается.</span></div>
+            <div><code>TO</code><span>Ответ не пришёл до таймаута.</span></div>
+            <div><code>AB</code><span>Нода вернула SDO Abort с 32-битным кодом причины.</span></div>
+            <div><code>ERR</code><span>Нарушена последовательность или формат SDO.</span></div>
+            <div><code>AM</code><span>Несколько запросов перекрылись, точное соответствие неоднозначно.</span></div>
+            <div><code>ORPH</code><span>Ответ получен без наблюдавшегося запроса.</span></div>
+          </div>
+          <p>Expedited SDO переносит до четырёх байт непосредственно в кадре. Segmented и block transfer состоят из нескольких кадров. Значение показывается вместе с raw-байтами, чтобы можно было проверить размер и порядок байт.</p>
+          <div class="help-note"><strong>TX journal.</strong> Для локального SDO запрос <code>REQ</code> и ответ <code>RESP</code> имеют общий SEQ. В ответе показаны raw-данные, задержка и расшифровка Abort. NMT не имеет непосредственного ответа и отображается одной строкой.</div>
+        </article>
+
+        <article id="help-bitrate" class="panel help-card">
+          <span class="eyebrow">04 · Скорость</span><h2>Bitrate и безопасная передача</h2>
+          <p>Все участники одной физической CAN-шины должны использовать одинаковую скорость. CanSniff поддерживает 10, 20, 50, 100, 125, 250, 500, 800 и 1000 кбит/с.</p>
+          <ul>
+            <li><strong>Auto</strong> пассивно перебирает скорости и выбирает вариант с достоверными кадрами. Во время поиска мост не должен передавать.</li>
+            <li><strong>Ручной режим</strong> сразу фиксирует выбранную скорость. Он предпочтителен для известной шины и при очень редком трафике.</li>
+            <li><strong>SILENT</strong> разрешает только приём. <strong>ACTIVE</strong> включает ACK и передачу SDO/NMT; его нужно включать только после определения скорости.</li>
+          </ul>
+          <p>Неверная скорость обычно проявляется отсутствием осмысленных кадров и ростом Stuff/Form/CRC/Bit ошибок. При высокой загрузке автоопределение может найти скорость быстро, но браузерный поток начнёт терять кадры раньше аппаратного анализатора.</p>
+          <p>Bridge-сессия получает эксклюзивное управление SDO: обычные запросы Web UI временно блокируются, а мониторинг и запись продолжаются.</p>
+        </article>
+
+        <article id="help-packets" class="panel help-card help-wide">
+          <span class="eyebrow">05 · Пакеты</span><h2>Основные типы CANopen</h2>
+          <div class="help-table-wrap"><table class="help-table">
+            <thead><tr><th>Тип</th><th>Типичный COB-ID</th><th>Назначение</th></tr></thead>
+            <tbody>
+              <tr><td>NMT</td><td><code>0x000</code></td><td>Команда состояния сети: Start, Stop, Pre-operational, Reset Node или Reset Communication.</td></tr>
+              <tr><td>SYNC</td><td><code>0x080</code></td><td>Общая синхронизация synchronous PDO. Сам кадр обычно не содержит данных.</td></tr>
+              <tr><td>EMCY</td><td><code>0x080 + Node</code></td><td>Аварийное сообщение ноды: error code, error register и vendor-specific данные.</td></tr>
+              <tr><td>TIME</td><td><code>0x100</code></td><td>Передача календарного времени CANopen.</td></tr>
+              <tr><td>TPDO1…4</td><td><code>0x180/280/380/480 + Node</code></td><td>Процессные данные от ноды к сети, например позиция энкодера.</td></tr>
+              <tr><td>RPDO1…4</td><td><code>0x200/300/400/500 + Node</code></td><td>Процессные команды от сети к ноде.</td></tr>
+              <tr><td>SDO response</td><td><code>0x580 + Node</code></td><td>Ответ SDO-сервера ноды, включая успешное чтение/запись или Abort.</td></tr>
+              <tr><td>SDO request</td><td><code>0x600 + Node</code></td><td>Запрос клиента к Object Dictionary ноды.</td></tr>
+              <tr><td>HB/Guard</td><td><code>0x700 + Node</code></td><td>Boot-up <code>00</code> или состояние: Stopped <code>04</code>, Operational <code>05</code>, Pre-operational <code>7F</code>.</td></tr>
+              <tr><td>LSS</td><td><code>0x7E4 / 0x7E5</code></td><td>Настройка Node ID и bitrate устройств, поддерживающих Layer Setting Services.</td></tr>
+            </tbody>
+          </table></div>
+          <p>COB-ID может быть перенастроен через Object Dictionary, поэтому нестандартное устройство не всегда укладывается в эти диапазоны. Распознавание CanSniff следует стандартному pre-defined connection set.</p>
+        </article>
+
+        <article id="help-errors" class="panel help-card help-wide">
+          <span class="eyebrow">06 · Ошибки</span><h2>Что обнаруживает CAN-контроллер</h2>
+          <p>Счётчики относятся к ошибкам физического и канального уровня CAN, а не к SDO Abort или EMCY. Одна неисправность может давать разные типы ошибок — классификация зависит от того, в каком поле кадра исказился бит.</p>
+          <div class="help-error-grid">
+            <div><h3>ACK error</h3><p>Передатчик не увидел dominant-бит в ACK slot. Возможны: на шине нет другой активной ноды, неверный bitrate, обрыв CANH/CANL, трансивер второй ноды выключен или кадр был испорчен до ACK.</p></div>
+            <div><h3>Stuff error</h3><p>После пяти одинаковых бит должен быть вставлен противоположный stuff-bit. Шесть одинаковых бит подряд означают помеху, ошибку синхронизации или несовпадение скорости.</p></div>
+            <div><h3>Form error</h3><p>В поле с фиксированным форматом обнаружен неверный уровень — например в CRC delimiter, ACK delimiter или EOF. Частые причины: сильная помеха, нода удерживает dominant, короткое замыкание или рассинхронизация.</p></div>
+            <div><h3>CRC error</h3><p>Структура кадра допустима, но рассчитанная CRC не совпала с принятой. Обычно повреждены один или несколько бит из-за помех, отражений, плохой земли или терминации.</p></div>
+            <div><h3>Bit recessive / dominant</h3><p>Передатчик прочитал на шине другой уровень, чем отправлял. Возможны конфликт передатчиков вне арбитража, КЗ, перепутанные линии, неисправный трансивер или слишком тяжёлая нагрузка шины.</p></div>
+            <div><h3>Warning</h3><p>Аппаратный TEC или REC достиг warning level. Связь ещё работает, но ошибки уже накопились; нужно искать причину до перехода в Error Passive.</p></div>
+            <div><h3>Error Passive</h3><p>TEC или REC превысил пассивный порог. Нода ограничивает влияние своих error flags и получает дополнительные задержки перед передачей. Это признак устойчивой проблемы.</p></div>
+            <div><h3>Bus-off</h3><p>TEC превысил допустимый предел, и контроллер прекратил передачу, чтобы не блокировать сеть. Нужны устранение причины и восстановление контроллера по правилам устройства.</p></div>
+            <div><h3>Unclassified</h3><p>Прерывание ошибки было зарегистрировано, но LEC не содержал однозначного типа либо состояние изменилось до чтения регистра.</p></div>
+          </div>
+          <h3>TEC, REC и порядок проверки</h3>
+          <p><code>TEC</code> — счётчик ошибок передачи, <code>REC</code> — приёма. Рост TEC чаще указывает на отсутствие ACK или проблему передающей стороны; рост REC — на повреждённые входящие кадры.</p>
+          <ol>
+            <li>Проверить общую землю, полярность CANH/CANL, разъёмы и питание трансиверов.</li>
+            <li>Измерить сопротивление между CANH и CANL при выключенном питании: для двух терминаторов 120 Ом ожидается около 60 Ом.</li>
+            <li>Убедиться, что bitrate и sample point совместимы у всех участников.</li>
+            <li>Проверить осциллографом уровни, фронты, отражения и длительность битов.</li>
+            <li>Отключать ноды по одной, чтобы найти источник ошибок или чрезмерной нагрузки.</li>
+          </ol>
+          <div class="help-note"><strong>Не путайте:</strong> CAN error — нарушение передачи кадра; EMCY — корректный CANopen-кадр об аварии внутри устройства; SDO Abort — корректный отказ выполнить запрос к объекту.</div>
+        </article>
       </div>
     </section>
   </main>

@@ -47,10 +47,14 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define UI_NODE_TABLE_Y        59U
 #define UI_NODE_TABLE_HEIGHT   (UI_NODE_VISIBLE_ROWS * UI_NODE_ROW_HEIGHT)
 
-#define UI_EVENT_VISIBLE_ROWS  11U
+#define UI_EVENT_VISIBLE_ROWS  9U
 #define UI_EVENT_ROW_HEIGHT    19U
-#define UI_EVENT_TABLE_Y       59U
+#define UI_EVENT_NMT_Y         36U
+#define UI_EVENT_NMT_HEIGHT    (2U * UI_EVENT_ROW_HEIGHT)
+#define UI_EVENT_HEADER_Y      (UI_EVENT_NMT_Y + UI_EVENT_NMT_HEIGHT)
+#define UI_EVENT_TABLE_Y       (UI_EVENT_HEADER_Y + 23U)
 #define UI_EVENT_TABLE_HEIGHT  (UI_EVENT_VISIBLE_ROWS * UI_EVENT_ROW_HEIGHT)
+#define UI_EVENT_NMT_COMMANDS  5U
 
 #define UI_SCANNER_VISIBLE_ROWS 6U
 #define UI_SCANNER_ROW_HEIGHT   24U
@@ -136,6 +140,12 @@ typedef struct
   uint32_t bitrate_kbps;
 } UiBitrateOption;
 
+typedef struct
+{
+  CanTxNmtCommand command;
+  const char *label;
+} UiNmtCommandOption;
+
 static const UiBitrateOption bitrate_options[] =
 {
   {"Auto", "Auto  " LV_SYMBOL_DOWN, 0U},
@@ -148,6 +158,15 @@ static const UiBitrateOption bitrate_options[] =
   {"50", "50 kbit/s  " LV_SYMBOL_DOWN, 50U},
   {"20", "20 kbit/s  " LV_SYMBOL_DOWN, 20U},
   {"10", "10 kbit/s  " LV_SYMBOL_DOWN, 10U}
+};
+
+static const UiNmtCommandOption node_nmt_commands[UI_EVENT_NMT_COMMANDS] =
+{
+  {CAN_TX_NMT_START, "START"},
+  {CAN_TX_NMT_STOP, "STOP"},
+  {CAN_TX_NMT_PRE_OPERATIONAL, "PRE"},
+  {CAN_TX_NMT_RESET_COMMUNICATION, "R.COM"},
+  {CAN_TX_NMT_RESET_NODE, "RESET"}
 };
 
 static const char *const tx_hex_keyboard_map[] =
@@ -220,8 +239,12 @@ static lv_obj_t *node_events_table_body;
 static lv_obj_t *node_events_spacer;
 static lv_obj_t *node_events_pause_label;
 static lv_obj_t *node_events_mode_label;
-static lv_obj_t *node_events_nmt_button;
-static lv_obj_t *node_events_nmt_label;
+static lv_obj_t *node_events_nmt_state_label;
+static lv_obj_t *node_events_nmt_labels[UI_EVENT_NMT_COMMANDS];
+static uint32_t node_events_nmt_feedback_until;
+static uint32_t node_events_nmt_confirm_until;
+static CanTxNmtCommand node_events_nmt_confirm_command;
+static bool node_events_nmt_confirm_pending;
 static lv_obj_t *node_events_type_header_label;
 static lv_obj_t *nodes_response_header_label;
 static lv_obj_t *event_cell_labels[UI_EVENT_VISIBLE_ROWS][7];
@@ -323,6 +346,12 @@ static const char info_packet_types_text[] =
   "Типы: NMT - управление сетью; SYNC - синхронизация; EMCY - авария; "
   "TIME - время; TPDO - данные от ноды; RPDO - команды ноде; SDO - доступ к объектам; "
   "HB/Guard - контроль состояния; LSS - настройка ноды.";
+static const char info_errors_text[] =
+  "ACK - нет подтверждения: нет второй ноды, обрыв или неверная скорость. "
+  "CRC/Stuff/Form - кадр поврежден: помехи, земля, терминация или скорость. "
+  "Bit rec/dom - уровень шины не совпал: КЗ, проводка или конфликт. "
+  "Warning/Passive - накоплены ошибки TEC/REC. Bus-off - CAN отключен после "
+  "серии ошибок. Unclassified - причина не распознана.";
 
 static void Refresh_NodesSnapshot(void);
 static void Refresh_NodeEventsSnapshot(void);
@@ -2174,11 +2203,61 @@ static void Format_NodeEventsTitle(char *title, uint32_t capacity)
                  (unsigned long)((analyzer_snapshot.last_timestamp_us / 1000U) % 1000U));
 }
 
+static bool NodeEvents_NmtDeadlineActive(uint32_t deadline)
+{
+  return (int32_t)(deadline - HAL_GetTick()) > 0;
+}
+
+static void NodeEvents_ResetNmtButtonLabels(void)
+{
+  uint32_t index;
+  for (index = 0U; index < UI_EVENT_NMT_COMMANDS; ++index)
+  {
+    lv_label_set_text(node_events_nmt_labels[index], node_nmt_commands[index].label);
+  }
+}
+
+static const char *NodeEvents_NmtStateShortName(uint8_t state)
+{
+  switch (state)
+  {
+    case 0U: return "BOOT";
+    case 4U: return "STOP";
+    case 5U: return "OP";
+    case 127U: return "PRE";
+    default: return "?";
+  }
+}
+
+static void NodeEvents_UpdateNmtState(bool has_nmt, uint8_t nmt_state)
+{
+  char text[16];
+  if (node_events_nmt_confirm_pending &&
+      !NodeEvents_NmtDeadlineActive(node_events_nmt_confirm_until))
+  {
+    node_events_nmt_confirm_pending = false;
+    NodeEvents_ResetNmtButtonLabels();
+  }
+  if (NodeEvents_NmtDeadlineActive(node_events_nmt_feedback_until)) return;
+  (void)snprintf(text, sizeof(text), "N%u %s", selected_node_id,
+                 has_nmt ? NodeEvents_NmtStateShortName(nmt_state) : "--");
+  lv_label_set_text(node_events_nmt_state_label, text);
+}
+
+static void NodeEvents_SetNmtFeedback(const char *status, uint32_t duration_ms)
+{
+  char text[16];
+  (void)snprintf(text, sizeof(text), "N%u %s", selected_node_id, status);
+  lv_label_set_text(node_events_nmt_state_label, text);
+  node_events_nmt_feedback_until = HAL_GetTick() + duration_ms;
+}
+
 static void Refresh_NodeEventsSnapshot(void)
 {
   uint32_t content_height;
   uint32_t index;
   bool has_nmt = false;
+  uint8_t nmt_state = 0U;
   char title[48];
 
   CanopenAnalyzer_GetGlobalSnapshot(&analyzer_snapshot);
@@ -2211,11 +2290,11 @@ static void Refresh_NodeEventsSnapshot(void)
     if (node_snapshot[index].node_id == selected_node_id)
     {
       has_nmt = node_snapshot[index].has_nmt_state;
+      nmt_state = node_snapshot[index].nmt_state;
       break;
     }
   }
-  lv_obj_set_hidden(node_events_nmt_button, !has_nmt);
-  if (has_nmt) lv_label_set_text(node_events_nmt_label, "START");
+  NodeEvents_UpdateNmtState(has_nmt, nmt_state);
   Render_EventRows();
 }
 
@@ -2266,23 +2345,50 @@ static void NodeEvents_ModeClicked(lv_event_t *event)
 
 static void NodeEvents_NmtClicked(lv_event_t *event)
 {
+  const UiNmtCommandOption *option =
+    (const UiNmtCommandOption *)lv_event_get_user_data(event);
   CanTxSubmitResult result;
   uint32_t sequence;
-  (void)event;
+  uint32_t index;
+  bool reset_command;
+  if (option == NULL) return;
+  reset_command = (option->command == CAN_TX_NMT_RESET_NODE) ||
+                  (option->command == CAN_TX_NMT_RESET_COMMUNICATION);
+  if (reset_command &&
+      (!node_events_nmt_confirm_pending ||
+       (node_events_nmt_confirm_command != option->command) ||
+       !NodeEvents_NmtDeadlineActive(node_events_nmt_confirm_until)))
+  {
+    node_events_nmt_confirm_pending = true;
+    node_events_nmt_confirm_command = option->command;
+    node_events_nmt_confirm_until = HAL_GetTick() + 3000U;
+    NodeEvents_ResetNmtButtonLabels();
+    for (index = 0U; index < UI_EVENT_NMT_COMMANDS; ++index)
+    {
+      if (node_nmt_commands[index].command == option->command)
+      {
+        lv_label_set_text(node_events_nmt_labels[index], "OK?");
+        break;
+      }
+    }
+    NodeEvents_SetNmtFeedback("CONF?", 3000U);
+    return;
+  }
+  node_events_nmt_confirm_pending = false;
+  NodeEvents_ResetNmtButtonLabels();
   if (CanBridge_IsActive())
   {
-    lv_label_set_text(node_events_nmt_label, "BUSY");
+    NodeEvents_SetNmtFeedback("BRIDGE", 1500U);
     return;
   }
   if (!CanControl_RequestActive(true))
   {
-    lv_label_set_text(node_events_nmt_label, "SYNC");
+    NodeEvents_SetNmtFeedback("SYNC?", 1500U);
     return;
   }
-  result = CanTx_SubmitNmt(CAN_TX_NMT_START, selected_node_id, &sequence);
+  result = CanTx_SubmitNmt(option->command, selected_node_id, &sequence);
   (void)sequence;
-  lv_label_set_text(node_events_nmt_label,
-                    result == CAN_TX_SUBMIT_OK ? "WAIT" : "BUSY");
+  NodeEvents_SetNmtFeedback(result == CAN_TX_SUBMIT_OK ? "TX" : "BUSY", 1200U);
 }
 
 static void Open_NodeEvents(lv_event_t *event)
@@ -2304,6 +2410,10 @@ static void Open_NodeEvents(lv_event_t *event)
   }
 
   selected_node_id = node_snapshot[index].node_id;
+  node_events_nmt_feedback_until = 0U;
+  node_events_nmt_confirm_until = 0U;
+  node_events_nmt_confirm_pending = false;
+  NodeEvents_ResetNmtButtonLabels();
   node_object_mode = false;
   event_sort_key = EVENT_SORT_TIME;
   event_sort_ascending = false;
@@ -2449,6 +2559,8 @@ void Ui_Init(void)
   lv_indev_t *touch;
   lv_obj_t *screen;
   lv_obj_t *header_panel;
+  lv_obj_t *nmt_panel;
+  lv_obj_t *nmt_button;
   lv_obj_t *bitrate_selector;
   lv_obj_t *bitrate_option_button;
   lv_obj_t *bitrate_option_label;
@@ -2809,16 +2921,17 @@ void Ui_Init(void)
   lv_label_set_long_mode(overview, LV_LABEL_LONG_WRAP);
   lv_obj_set_height(overview, 48);
   lv_obj_set_style_text_align(overview, LV_TEXT_ALIGN_CENTER, 0);
-  (void)Create_InfoModeButton(info_screen, 4, 90, "Монитор", info_monitor_text);
-  (void)Create_InfoModeButton(info_screen, 99, 90, "Ноды", info_nodes_text);
-  (void)Create_InfoModeButton(info_screen, 194, 90, "Объекты", info_objects_text);
-  (void)Create_InfoModeButton(info_screen, 289, 90, "Скорость", info_bitrate_text);
-  (void)Create_InfoModeButton(info_screen, 384, 92, "Пакеты", info_packet_types_text);
+  (void)Create_InfoModeButton(info_screen, 4, 75, "Монитор", info_monitor_text);
+  (void)Create_InfoModeButton(info_screen, 83, 75, "Ноды", info_nodes_text);
+  (void)Create_InfoModeButton(info_screen, 162, 75, "Объекты", info_objects_text);
+  (void)Create_InfoModeButton(info_screen, 241, 75, "Скорость", info_bitrate_text);
+  (void)Create_InfoModeButton(info_screen, 320, 75, "Пакеты", info_packet_types_text);
+  (void)Create_InfoModeButton(info_screen, 399, 75, "Ошибки", info_errors_text);
   info_description_label = Create_Label(info_screen, 16, 150, 448,
                                         "Нажмите кнопку режима, чтобы увидеть описание.",
                                         lv_color_hex(0xA9C7D7));
   lv_label_set_long_mode(info_description_label, LV_LABEL_LONG_WRAP);
-  lv_obj_set_height(info_description_label, 78);
+  lv_obj_set_height(info_description_label, 92);
   lv_obj_set_style_text_align(info_description_label, LV_TEXT_ALIGN_CENTER, 0);
   version = Create_Label(info_screen, 16, 249, 448,
                          "Версия ПО " CAN_SNIFFER_VERSION,
@@ -3089,20 +3202,9 @@ void Ui_Init(void)
   }
 
   (void)Create_NavigationButton(node_events_screen, 4, 3, 44, 34, LV_SYMBOL_LEFT, nodes_screen);
-  node_events_title_label = Create_Label(node_events_screen, 54, 10, 242,
+  node_events_title_label = Create_Label(node_events_screen, 54, 10, 302,
                                          "Node transactions", lv_color_hex(0x65C7F7));
   lv_obj_set_style_text_font(node_events_title_label, &lv_font_montserrat_14, 0);
-
-  node_events_nmt_button = lv_button_create(node_events_screen);
-  lv_obj_set_size(node_events_nmt_button, 56, 34);
-  lv_obj_set_pos(node_events_nmt_button, 300, 1);
-  lv_obj_set_style_pad_all(node_events_nmt_button, 0, 0);
-  lv_obj_add_event_cb(node_events_nmt_button, NodeEvents_NmtClicked,
-                      LV_EVENT_CLICKED, NULL);
-  node_events_nmt_label = lv_label_create(node_events_nmt_button);
-  lv_label_set_text(node_events_nmt_label, "START");
-  lv_obj_center(node_events_nmt_label);
-  lv_obj_set_hidden(node_events_nmt_button, true);
 
   mode_button = lv_button_create(node_events_screen);
   lv_obj_set_size(mode_button, 56, 34);
@@ -3122,9 +3224,34 @@ void Ui_Init(void)
   lv_label_set_text(node_events_pause_label, LV_SYMBOL_PAUSE);
   lv_obj_center(node_events_pause_label);
 
+  nmt_panel = lv_obj_create(node_events_screen);
+  lv_obj_remove_style_all(nmt_panel);
+  lv_obj_set_pos(nmt_panel, 0, UI_EVENT_NMT_Y);
+  lv_obj_set_size(nmt_panel, LCD_WIDTH, UI_EVENT_NMT_HEIGHT);
+  lv_obj_set_style_bg_color(nmt_panel, lv_color_hex(0x12303A), 0);
+  lv_obj_set_style_bg_opa(nmt_panel, LV_OPA_COVER, 0);
+  lv_obj_set_scrollable(nmt_panel, false);
+  node_events_nmt_state_label = Create_Label(nmt_panel, 4, 12, 66, "NMT --",
+                                              lv_color_hex(0x65C7F7));
+  lv_obj_set_style_text_font(node_events_nmt_state_label, &lv_font_montserrat_12, 0);
+  for (option = 0U; option < UI_EVENT_NMT_COMMANDS; ++option)
+  {
+    nmt_button = lv_button_create(nmt_panel);
+    lv_obj_set_pos(nmt_button, 74 + (int32_t)(option * 81U), 3);
+    lv_obj_set_size(nmt_button, 78, 32);
+    lv_obj_set_style_pad_all(nmt_button, 0, 0);
+    lv_obj_set_style_radius(nmt_button, 3, 0);
+    lv_obj_add_event_cb(nmt_button, NodeEvents_NmtClicked, LV_EVENT_CLICKED,
+                        (void *)&node_nmt_commands[option]);
+    node_events_nmt_labels[option] = lv_label_create(nmt_button);
+    lv_obj_set_style_text_font(node_events_nmt_labels[option], &lv_font_montserrat_12, 0);
+    lv_label_set_text(node_events_nmt_labels[option], node_nmt_commands[option].label);
+    lv_obj_center(node_events_nmt_labels[option]);
+  }
+
   header_panel = lv_obj_create(node_events_screen);
   lv_obj_remove_style_all(header_panel);
-  lv_obj_set_pos(header_panel, 0, 36);
+  lv_obj_set_pos(header_panel, 0, UI_EVENT_HEADER_Y);
   lv_obj_set_size(header_panel, LCD_WIDTH, 23);
   lv_obj_set_style_bg_color(header_panel, lv_color_hex(0x17242B), 0);
   lv_obj_set_style_bg_opa(header_panel, LV_OPA_COVER, 0);
@@ -3180,13 +3307,20 @@ void Ui_Init(void)
   }
 
   Create_GridLine(node_events_screen, 0, 35, LCD_WIDTH, 1);
-  Create_GridLine(node_events_screen, 0, 58, LCD_WIDTH, 1);
-  Create_GridLine(node_events_screen, 84, 36, 1, 236);
-  Create_GridLine(node_events_screen, 146, 36, 1, 236);
-  Create_GridLine(node_events_screen, 194, 36, 1, 236);
-  Create_GridLine(node_events_screen, 254, 36, 1, 236);
-  Create_GridLine(node_events_screen, 302, 36, 1, 236);
-  Create_GridLine(node_events_screen, 336, 36, 1, 236);
+  Create_GridLine(node_events_screen, 0, UI_EVENT_HEADER_Y - 1, LCD_WIDTH, 1);
+  Create_GridLine(node_events_screen, 0, UI_EVENT_TABLE_Y - 1, LCD_WIDTH, 1);
+  Create_GridLine(node_events_screen, 84, UI_EVENT_HEADER_Y, 1,
+                  LCD_HEIGHT - UI_EVENT_HEADER_Y);
+  Create_GridLine(node_events_screen, 146, UI_EVENT_HEADER_Y, 1,
+                  LCD_HEIGHT - UI_EVENT_HEADER_Y);
+  Create_GridLine(node_events_screen, 194, UI_EVENT_HEADER_Y, 1,
+                  LCD_HEIGHT - UI_EVENT_HEADER_Y);
+  Create_GridLine(node_events_screen, 254, UI_EVENT_HEADER_Y, 1,
+                  LCD_HEIGHT - UI_EVENT_HEADER_Y);
+  Create_GridLine(node_events_screen, 302, UI_EVENT_HEADER_Y, 1,
+                  LCD_HEIGHT - UI_EVENT_HEADER_Y);
+  Create_GridLine(node_events_screen, 336, UI_EVENT_HEADER_Y, 1,
+                  LCD_HEIGHT - UI_EVENT_HEADER_Y);
   for (line = 1U; line < UI_EVENT_VISIBLE_ROWS; ++line)
   {
     Create_GridLine(node_events_screen, 0,

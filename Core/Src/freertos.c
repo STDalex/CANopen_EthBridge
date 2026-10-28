@@ -290,6 +290,7 @@ void StartCanRxTask(void const * argument)
     CanLogger_ProducerPoll();
     while (CanCapture_Pop(&frame))
     {
+      CanTx_ObserveRxFrame(&frame);
       CanScanner_ProcessFrame(&frame);
       CanLogger_SubmitFrame(&frame);
       ApiServer_SubmitFrame(&frame);
