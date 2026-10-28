@@ -166,6 +166,14 @@ void DebugMon_Handler(void)
 /******************************************************************************/
 
 /**
+  * @brief Deferred CAN receive notification at a FreeRTOS-safe priority.
+  */
+void CAN1_TX_IRQHandler(void)
+{
+  CanCapture_DeferredIRQHandler();
+}
+
+/**
   * @brief This function handles CAN1 RX0 interrupts.
   */
 void CAN1_RX0_IRQHandler(void)

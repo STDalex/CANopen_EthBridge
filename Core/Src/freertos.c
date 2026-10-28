@@ -58,11 +58,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
-#define GUI_FRAME_QUEUE_LENGTH 64U
 #define ANALYZER_FRAME_QUEUE_LENGTH 128U
-static StaticQueue_t guiFrameQueueControlBlock;
-static uint8_t guiFrameQueueStorage[GUI_FRAME_QUEUE_LENGTH * sizeof(CanFrameRecord)];
-static QueueHandle_t guiFrameQueue;
 static StaticQueue_t analyzerFrameQueueControlBlock;
 static uint8_t analyzerFrameQueueStorage[ANALYZER_FRAME_QUEUE_LENGTH * sizeof(CanFrameRecord)];
 static QueueHandle_t analyzerFrameQueue;
@@ -112,8 +108,8 @@ void vApplicationMallocFailedHook(void);
 void CanPipeline_ResetStatistics(void)
 {
   taskENTER_CRITICAL();
-  (void)xQueueReset(guiFrameQueue);
   (void)xQueueReset(analyzerFrameQueue);
+  Ui_ResetFrameHistory();
   CanControl_ResetStatistics();
   CanopenAnalyzer_Reset();
   CanLogger_ResetCounters();
@@ -136,10 +132,7 @@ bool CanPipeline_PublishLocalTx(const CanFrameRecord *frame)
   }
   CanScanner_ProcessFrame(frame);
   ApiServer_SubmitFrame(frame);
-  if (xQueueSend(guiFrameQueue, frame, 0U) != pdPASS)
-  {
-    CanControl_AddGuiOverflow();
-  }
+  Ui_SubmitFrame(frame);
   return analyzer_queued;
 }
 
@@ -215,10 +208,6 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  guiFrameQueue = xQueueCreateStatic(GUI_FRAME_QUEUE_LENGTH,
-                                     sizeof(CanFrameRecord),
-                                     guiFrameQueueStorage,
-                                     &guiFrameQueueControlBlock);
   analyzerFrameQueue = xQueueCreateStatic(ANALYZER_FRAME_QUEUE_LENGTH,
                                           sizeof(CanFrameRecord),
                                           analyzerFrameQueueStorage,
@@ -298,10 +287,7 @@ void StartCanRxTask(void const * argument)
       {
         CanopenAnalyzer_AddQueueOverflow();
       }
-      if (xQueueSend(guiFrameQueue, &frame, 0U) != pdPASS)
-      {
-        CanControl_AddGuiOverflow();
-      }
+      Ui_SubmitFrame(&frame);
     }
     CanLogger_ProducerPoll();
   }
@@ -360,20 +346,11 @@ void StartAnalyzerTask(void const * argument)
 void StartGuiTask(void const * argument)
 {
   /* USER CODE BEGIN StartGuiTask */
-  CanFrameRecord frame;
-  uint32_t count;
   (void)argument;
   Ui_Init();
   /* Infinite loop */
   for(;;)
   {
-    count = 0U;
-    while ((count < GUI_FRAME_QUEUE_LENGTH) &&
-           (xQueueReceive(guiFrameQueue, &frame, 0U) == pdPASS))
-    {
-      Ui_ProcessFrame(&frame);
-      ++count;
-    }
     Ui_TaskLoop();
     osDelay(5U);
   }

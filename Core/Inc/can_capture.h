@@ -100,6 +100,7 @@ void CanCapture_Init(void);
 void CanCapture_SetConsumerTask(void *task_handle);
 bool CanCapture_Pop(CanFrameRecord *frame);
 void CanCapture_RxIRQHandler(void);
+void CanCapture_DeferredIRQHandler(void);
 void CanCapture_ErrorIRQHandler(void);
 void CanCapture_TimerIRQHandler(void);
 void CanSafety_EmergencyDisableTx(void);

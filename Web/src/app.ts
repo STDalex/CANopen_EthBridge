@@ -21,6 +21,7 @@ interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; bitrate_kbps: 
 interface CanTxStatus { queue_depth: number; queue_capacity: number; transmitting: boolean; queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number; last_sequence: number; last_result: string; rate_limit_fps: number; periodic_active: boolean; periodic_sequence: number; periodic_period_ms: number; periodic_attempts: number }
 interface CanTxResponse { timestamp_us: number; response_time_us: number; can_id: number; dlc: number; raw: number[] }
 interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; type?: 'nmt'; node_id: number; command: SdoCommand | NmtCommand; index?: number; subindex?: number; value?: number; can_id: number; raw: number[]; timeout_ms: number; has_response?: boolean; response?: CanTxResponse }
+interface SdoRequestHistoryEntry { node_id: number; command: SdoCommand; index: number; subindex: number; value: number; timeout_ms: number }
 interface NmtAccepted { sequence: number; status: 'queued'; command: NmtCommand; node_id: number }
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -416,6 +417,46 @@ async function refreshTxHistory(showError = false): Promise<void> {
   }
 }
 
+function applySdoRequestHistory(entry: SdoRequestHistoryEntry): void {
+  $<HTMLInputElement>('tx-node').value = String(entry.node_id);
+  $<HTMLSelectElement>('tx-command').value = entry.command;
+  $<HTMLInputElement>('tx-index').value = hex(entry.index, 4);
+  $<HTMLInputElement>('tx-subindex').value = hex(entry.subindex, 2);
+  $<HTMLInputElement>('tx-value').value = entry.command === 'read' ? '0' : entry.value.toString(16).toUpperCase();
+  $<HTMLInputElement>('tx-timeout').value = String(entry.timeout_ms);
+  updateSdoForm();
+  $('tx-form').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  notify('Параметры перенесены в форму. Для передачи нажмите кнопку отправки.');
+}
+
+async function refreshSdoRequestHistory(showError = false): Promise<void> {
+  const target = $<HTMLSelectElement>('sdo-request-history');
+  try {
+    const result = await api<{ count: number; items: SdoRequestHistoryEntry[] }>('/api/v1/can/sdo/history');
+    target.replaceChildren();
+    if (!result.items.length) {
+      target.add(new Option('Сохранённых запросов пока нет', ''));
+      target.disabled = true;
+      return;
+    }
+    target.add(new Option('Выберите запрос…', ''));
+    result.items.forEach((entry, index) => {
+      const bytes = sdoValueBytes(entry.command);
+      const value = bytes ? `0x${hex(entry.value, bytes * 2)}` : '—';
+      target.add(new Option(`Node ${entry.node_id} · ${sdoCommandName(entry.command)} · 0x${hex(entry.index, 4)}:${hex(entry.subindex, 2)} · ${value}`, String(index)));
+    });
+    target.disabled = false;
+    target.onchange = () => {
+      if (target.value === '') return;
+      const entry = result.items[Number(target.value)];
+      if (entry) applySdoRequestHistory(entry);
+      target.value = '';
+    };
+  } catch (error) {
+    if (showError) notify(error instanceof Error ? error.message : 'История SDO недоступна', true);
+  }
+}
+
 function updateSdoForm(): void {
   const command = $<HTMLSelectElement>('tx-command').value as SdoCommand;
   const bytes = sdoValueBytes(command);
@@ -450,10 +491,11 @@ async function submitTxFrame(periodic = false): Promise<void> {
     ...(periodic ? { period_ms: period } : {})
   };
   try {
-    const result = await api<{ sequence: number; status: string; period_ms: number }>('/api/v1/can/tx', { method: 'POST', body: JSON.stringify(body) });
+    const result = await api<{ sequence: number; status: string; period_ms: number; history_saved: boolean }>('/api/v1/can/tx', { method: 'POST', body: JSON.stringify(body) });
     if (!periodic) lastSubmittedSequence = result.sequence;
-    notify(periodic ? `Периодический SDO-запрос #${result.sequence} запущен` : `SDO-запрос #${result.sequence} поставлен в очередь`);
+    notify((periodic ? `Периодический SDO-запрос #${result.sequence} запущен` : `SDO-запрос #${result.sequence} поставлен в очередь`) + (result.history_saved ? '' : '. Не удалось сохранить историю в QSPI'), !result.history_saved);
     await refreshTx();
+    await refreshSdoRequestHistory();
     window.setTimeout(() => void refreshTxHistory(), 250);
   } catch (error) {
     notify(error instanceof Error ? error.message : 'Кадр не поставлен в очередь', true);
@@ -498,7 +540,8 @@ async function refreshStatus(): Promise<void> {
     text('can-state', state.can.state);
     text('bus-load', `${(stats.can.bus_load_permille / 10).toFixed(1)} %`);
     text('traffic-total', `${formatInt(stats.can.received)} кадров`);
-    text('can-drops', formatInt(stats.can.ring_overflows + stats.can.gui_overflows + stats.analyzer.queue_overflows));
+    text('can-loss', formatInt(stats.can.ring_overflows));
+    text('analyzer-loss', formatInt(stats.analyzer.queue_overflows));
     text('can-errors', formatInt(stats.can.errors));
     renderErrorStatistics(stats.can);
     text('log-mode', modeName(state.storage.mode));
@@ -810,7 +853,8 @@ async function resetStatistics(): Promise<void> {
     renderNodes();
     renderVisibleFrames();
     text('traffic-total', '0 кадров');
-    text('can-drops', '0');
+    text('can-loss', '0');
+    text('analyzer-loss', '0');
     text('can-errors', '0');
     renderErrorStatistics(emptyCanStatistics);
     await refreshNodes();
@@ -826,7 +870,7 @@ function bindUi(): void {
     button.classList.add('active'); $(`tab-${button.dataset.tab}`).classList.add('active');
     if (button.dataset.tab === 'logs') void refreshLogs(true);
     if (button.dataset.tab === 'settings') void loadSettings();
-    if (button.dataset.tab === 'transmit') { void refreshTx(true); void refreshTxHistory(); }
+    if (button.dataset.tab === 'transmit') { void refreshTx(true); void refreshTxHistory(); void refreshSdoRequestHistory(); }
   });
   ['frame-search','type-filter','node-filter'].forEach(id => $(id).addEventListener('input', () => { filterDirty = true; renderVisibleFrames(); }));
   $('frame-viewport').addEventListener('scroll', renderVisibleFrames, { passive: true });
@@ -892,6 +936,7 @@ function bindUi(): void {
   $('tx-periodic-stop').onclick = () => void stopPeriodicTx();
   $('tx-cancel-last').onclick = () => void cancelLastTx();
   $('refresh-tx-history').onclick = () => void refreshTxHistory(true);
+  $('refresh-sdo-history').onclick = () => void refreshSdoRequestHistory(true);
 }
 
 bindUi();

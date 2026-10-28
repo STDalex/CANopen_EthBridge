@@ -30,6 +30,7 @@
 /* USER CODE BEGIN Includes */
 #include "can_capture.h"
 #include "app_settings.h"
+#include "sdo_history.h"
 
 /* USER CODE END Includes */
 
@@ -140,6 +141,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   CanCapture_Init();
   AppSettings_Init();
+  SdoHistory_Init();
   {
     DeviceSettings settings;
     AppSettings_Get(&settings);

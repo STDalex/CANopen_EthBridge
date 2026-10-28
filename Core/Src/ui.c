@@ -14,6 +14,7 @@
 #include "main.h"
 #include "memory_layout.h"
 #include "network_service.h"
+#include "sdo_history.h"
 #include "touch_ft5336.h"
 #include "lvgl.h"
 
@@ -31,6 +32,7 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define UI_VISIBLE_ROWS        12U
 #define UI_HISTORY_LENGTH      256U
 #define UI_HISTORY_MASK        (UI_HISTORY_LENGTH - 1U)
+#define UI_FRAME_SAMPLE_MS     50U
 #define UI_ROW_HEIGHT          18U
 #define UI_TABLE_Y             56U
 #define UI_TABLE_HEIGHT        (UI_VISIBLE_ROWS * UI_ROW_HEIGHT)
@@ -61,6 +63,7 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define UI_SCANNER_TABLE_Y      82U
 #define UI_SCANNER_TABLE_HEIGHT (UI_SCANNER_VISIBLE_ROWS * UI_SCANNER_ROW_HEIGHT)
 
+#define UI_CAPTURE_HISTORY_BYTES (UI_HISTORY_LENGTH * sizeof(CanFrameRecord))
 #define UI_HISTORY_BYTES       (UI_HISTORY_LENGTH * sizeof(CanFrameRecord))
 #define UI_NODE_SNAPSHOT_BYTES (CANOPEN_NODE_COUNT_MAX * sizeof(CanopenNodeSnapshot))
 #define UI_EVENT_SNAPSHOT_BYTES \
@@ -68,7 +71,8 @@ LV_FONT_DECLARE(ui_font_cyrillic_14)
 #define UI_SCANNER_SNAPSHOT_BYTES \
   (CAN_SCANNER_RESULT_MAX * sizeof(CanScannerResult))
 
-_Static_assert((UI_HISTORY_BYTES + UI_NODE_SNAPSHOT_BYTES + UI_EVENT_SNAPSHOT_BYTES +
+_Static_assert((UI_CAPTURE_HISTORY_BYTES + UI_HISTORY_BYTES +
+                UI_NODE_SNAPSHOT_BYTES + UI_EVENT_SNAPSHOT_BYTES +
                 UI_SCANNER_SNAPSHOT_BYTES) <=
                UI_SNAPSHOT_REGION_BYTES,
                "UI snapshot buffers exceed their external SDRAM region");
@@ -197,6 +201,7 @@ static lv_obj_t *node_events_screen;
 static lv_obj_t *info_screen;
 static lv_obj_t *log_screen;
 static lv_obj_t *tx_screen;
+static lv_obj_t *tx_history_screen;
 static lv_obj_t *scanner_screen;
 static lv_obj_t *status_label;
 static lv_obj_t *main_status_label;
@@ -212,7 +217,15 @@ static lv_obj_t *table_body;
 static lv_obj_t *history_spacer;
 static lv_obj_t *cell_labels[UI_VISIBLE_ROWS][6];
 static UiRowText row_text[UI_VISIBLE_ROWS];
-static CanFrameRecord *const history = (CanFrameRecord *)UI_SNAPSHOT_BASE;
+static CanFrameRecord *const capture_history =
+  (CanFrameRecord *)UI_SNAPSHOT_BASE;
+static CanFrameRecord *const history =
+  (CanFrameRecord *)(UI_SNAPSHOT_BASE + UI_CAPTURE_HISTORY_BYTES);
+static volatile uint32_t capture_history_write;
+static uint32_t capture_history_read;
+static volatile uint32_t capture_reset_write;
+static volatile uint32_t capture_reset_generation;
+static uint32_t capture_observed_reset_generation;
 static uint32_t history_write;
 static uint32_t history_count;
 static bool rows_dirty;
@@ -228,7 +241,8 @@ static lv_obj_t *node_cell_labels[UI_NODE_VISIBLE_ROWS][6];
 static lv_obj_t *node_open_buttons[UI_NODE_VISIBLE_ROWS];
 static UiNodeRowText node_row_text[UI_NODE_VISIBLE_ROWS];
 static CanopenNodeSnapshot *const node_snapshot =
-  (CanopenNodeSnapshot *)(UI_SNAPSHOT_BASE + UI_HISTORY_BYTES);
+  (CanopenNodeSnapshot *)(UI_SNAPSHOT_BASE + UI_CAPTURE_HISTORY_BYTES +
+                         UI_HISTORY_BYTES);
 static CanopenGlobalSnapshot analyzer_snapshot;
 static uint32_t node_snapshot_count;
 static NodeSortKey node_sort_key;
@@ -250,7 +264,8 @@ static lv_obj_t *nodes_response_header_label;
 static lv_obj_t *event_cell_labels[UI_EVENT_VISIBLE_ROWS][7];
 static UiEventRowText event_row_text[UI_EVENT_VISIBLE_ROWS];
 static CanopenNodeEventSnapshot *const event_snapshot =
-  (CanopenNodeEventSnapshot *)(UI_SNAPSHOT_BASE + UI_HISTORY_BYTES +
+  (CanopenNodeEventSnapshot *)(UI_SNAPSHOT_BASE + UI_CAPTURE_HISTORY_BYTES +
+                               UI_HISTORY_BYTES +
                                UI_NODE_SNAPSHOT_BYTES);
 static uint32_t event_snapshot_count;
 static uint8_t selected_node_id;
@@ -311,6 +326,11 @@ static int32_t tx_field_y;
 static int32_t tx_field_width;
 static int32_t tx_field_height;
 static CanTxSdoCommand tx_command;
+static lv_obj_t *tx_history_buttons[SDO_HISTORY_CAPACITY];
+static lv_obj_t *tx_history_labels[SDO_HISTORY_CAPACITY];
+static lv_obj_t *tx_history_empty_label;
+static CanTxSdoRequest tx_history_requests[SDO_HISTORY_CAPACITY];
+static size_t tx_history_count;
 static lv_obj_t *bridge_indicator_label;
 static lv_obj_t *scanner_indicator_label;
 static lv_obj_t *scanner_action_button;
@@ -321,13 +341,16 @@ static lv_obj_t *scanner_spacer;
 static lv_obj_t *scanner_cell_labels[UI_SCANNER_VISIBLE_ROWS][4];
 static UiScannerRowText scanner_row_text[UI_SCANNER_VISIBLE_ROWS];
 static CanScannerResult *const scanner_snapshot =
-  (CanScannerResult *)(UI_SNAPSHOT_BASE + UI_HISTORY_BYTES +
+  (CanScannerResult *)(UI_SNAPSHOT_BASE + UI_CAPTURE_HISTORY_BYTES +
+                       UI_HISTORY_BYTES +
                        UI_NODE_SNAPSHOT_BYTES + UI_EVENT_SNAPSHOT_BYTES);
 static uint32_t scanner_snapshot_count;
 static bool scanner_programmatic_scroll;
 
 static const char info_monitor_text[] =
   "Монитор: все принятые CAN-кадры с временем, ID, форматом, DLC и данными. "
+  "Таблица берет снимок последних кадров 20 раз/с; промежуточные обновления "
+  "экрана не считаются потерей. DROP учитывает CAN RX и анализатор. "
   "LOAD - оценка занятого времени CAN за последнюю секунду с учетом скорости, "
   "длины кадров и bit stuffing. Значение обновляется раз в секунду. "
   "Пауза не останавливает прием.";
@@ -359,6 +382,7 @@ static void Render_Rows(void);
 static void Render_NodeRows(void);
 static void Refresh_LogStatus(void);
 static void Tx_RefreshStatus(void);
+static void TxHistory_Refresh(void);
 static void Refresh_Scanner(void);
 
 static void Refresh_ErrorStatistics(const CanCaptureStatus *status)
@@ -375,7 +399,7 @@ static void Refresh_ErrorStatistics(const CanCaptureStatus *status)
                  "Interrupts: %lu     CAN RX: %lu     DROP: %lu",
                  (unsigned long)errors->interrupts,
                  (unsigned long)status->received,
-                 (unsigned long)(status->ring_overflows + status->gui_overflows +
+                 (unsigned long)(status->ring_overflows +
                                  CanopenAnalyzer_GetQueueOverflows()));
   lv_label_set_text(error_summary_label, text);
 
@@ -778,6 +802,7 @@ static void Tx_EndEditing(void)
   lv_keyboard_set_textarea(tx_keyboard, NULL);
   lv_obj_set_hidden(tx_keyboard, true);
   lv_obj_set_hidden(tx_edit_panel, true);
+  lv_obj_scroll_to(tx_screen, 0, 0, LV_ANIM_OFF);
 }
 
 static const char *Tx_FieldName(lv_obj_t *field)
@@ -793,7 +818,10 @@ static const char *Tx_FieldName(lv_obj_t *field)
 static void Tx_BeginEditing(lv_obj_t *field)
 {
   if (lv_obj_has_state(field, LV_STATE_DISABLED)) return;
-  if ((tx_active_field != NULL) && (tx_active_field != field)) Tx_EndEditing();
+  /* A second tap is used to move the textarea cursor. Do not overwrite the
+     saved normal geometry with the temporary full-width edit geometry. */
+  if (tx_active_field == field) return;
+  if (tx_active_field != NULL) Tx_EndEditing();
   tx_field_x = lv_obj_get_x(field);
   tx_field_y = lv_obj_get_y(field);
   tx_field_width = lv_obj_get_width(field);
@@ -867,6 +895,78 @@ static bool Tx_ReadRequest(CanTxSdoRequest *request)
   return true;
 }
 
+static const char *TxHistory_CommandLabel(CanTxSdoCommand command)
+{
+  switch (command)
+  {
+    case CAN_TX_SDO_READ: return "READ";
+    case CAN_TX_SDO_WRITE_U8: return "WRITE8";
+    case CAN_TX_SDO_WRITE_U16: return "WRITE16";
+    case CAN_TX_SDO_WRITE_U24: return "WRITE24";
+    case CAN_TX_SDO_WRITE_U32: return "WRITE32";
+    default: return "?";
+  }
+}
+
+static void TxHistory_Refresh(void)
+{
+  uint32_t row;
+  char text[64];
+
+  tx_history_count = SdoHistory_Copy(tx_history_requests,
+                                     SDO_HISTORY_CAPACITY);
+  for (row = 0U; row < SDO_HISTORY_CAPACITY; ++row)
+  {
+    if (row >= tx_history_count)
+    {
+      lv_obj_set_hidden(tx_history_buttons[row], true);
+      continue;
+    }
+    if (tx_history_requests[row].command == CAN_TX_SDO_READ)
+    {
+      (void)snprintf(text, sizeof(text), "N%03u  %-7s  %04X:%02X  --",
+                     (unsigned int)tx_history_requests[row].node_id,
+                     TxHistory_CommandLabel(tx_history_requests[row].command),
+                     (unsigned int)tx_history_requests[row].index,
+                     (unsigned int)tx_history_requests[row].subindex);
+    }
+    else
+    {
+      (void)snprintf(text, sizeof(text), "N%03u  %-7s  %04X:%02X  0x%lX",
+                     (unsigned int)tx_history_requests[row].node_id,
+                     TxHistory_CommandLabel(tx_history_requests[row].command),
+                     (unsigned int)tx_history_requests[row].index,
+                     (unsigned int)tx_history_requests[row].subindex,
+                     (unsigned long)tx_history_requests[row].value);
+    }
+    lv_label_set_text(tx_history_labels[row], text);
+    lv_obj_set_hidden(tx_history_buttons[row], false);
+  }
+  lv_obj_set_hidden(tx_history_empty_label, tx_history_count != 0U);
+}
+
+static void TxHistory_Selected(lv_event_t *event)
+{
+  size_t row = (size_t)(uintptr_t)lv_event_get_user_data(event);
+  const CanTxSdoRequest *request;
+  char text[16];
+
+  if (row >= tx_history_count) return;
+  request = &tx_history_requests[row];
+  (void)snprintf(text, sizeof(text), "%u", (unsigned int)request->node_id);
+  lv_textarea_set_text(tx_node_textarea, text);
+  (void)snprintf(text, sizeof(text), "%04X", (unsigned int)request->index);
+  lv_textarea_set_text(tx_index_textarea, text);
+  (void)snprintf(text, sizeof(text), "%02X", (unsigned int)request->subindex);
+  lv_textarea_set_text(tx_subindex_textarea, text);
+  (void)snprintf(text, sizeof(text), "%lX", (unsigned long)request->value);
+  lv_textarea_set_text(tx_value_textarea, text);
+  tx_command = request->command;
+  Tx_UpdateFormLabels();
+  lv_screen_load(tx_screen);
+  lv_label_set_text(tx_status_label, "Loaded from history; press SEND to transmit");
+}
+
 static void Tx_ModeClicked(lv_event_t *event)
 {
   CanTxStatus status;
@@ -905,8 +1005,10 @@ static void Tx_ModeClicked(lv_event_t *event)
   result = CanTx_StartPeriodicSdo(&request, period_ms, &sequence);
   if (result == CAN_TX_SUBMIT_OK)
   {
-    (void)snprintf(text, sizeof(text), "Periodic #%lu started every %lu ms",
-                   (unsigned long)sequence, (unsigned long)period_ms);
+    bool history_saved = SdoHistory_Remember(&request);
+    (void)snprintf(text, sizeof(text), "Periodic #%lu every %lu ms%s",
+                   (unsigned long)sequence, (unsigned long)period_ms,
+                   history_saved ? "" : "; history save failed");
     lv_label_set_text(tx_status_label, text);
   }
   else if (result == CAN_TX_SUBMIT_MODE_DISABLED)
@@ -940,11 +1042,13 @@ static void Tx_SendClicked(lv_event_t *event)
   result = CanTx_SubmitSdo(&request, &sequence);
   if (result == CAN_TX_SUBMIT_OK)
   {
+    bool history_saved = SdoHistory_Remember(&request);
     (void)snprintf(text, sizeof(text),
-                   "Queued #%lu: node %u, %s 0x%04X:%02X",
+                   "Queued #%lu: N%u %s %04X:%02X%s",
                    (unsigned long)sequence, (unsigned int)request.node_id,
                    CanTx_SdoCommandName(request.command),
-                   (unsigned int)request.index, (unsigned int)request.subindex);
+                   (unsigned int)request.index, (unsigned int)request.subindex,
+                   history_saved ? "" : "; history save failed");
     lv_label_set_text(tx_status_label, text);
   }
   else if (result == CAN_TX_SUBMIT_MODE_DISABLED)
@@ -1119,6 +1223,11 @@ static void Navigation_Clicked(lv_event_t *event)
     else if (target == tx_screen)
     {
       Tx_RefreshStatus();
+    }
+    else if (target == tx_history_screen)
+    {
+      Tx_EndEditing();
+      TxHistory_Refresh();
     }
     lv_screen_load(target);
   }
@@ -2607,6 +2716,7 @@ void Ui_Init(void)
   info_screen = lv_obj_create(NULL);
   log_screen = lv_obj_create(NULL);
   tx_screen = lv_obj_create(NULL);
+  tx_history_screen = lv_obj_create(NULL);
   scanner_screen = lv_obj_create(NULL);
   nodes_return_screen = main_screen;
   Style_Screen(main_screen);
@@ -2621,6 +2731,11 @@ void Ui_Init(void)
   Style_Screen(info_screen);
   Style_Screen(log_screen);
   Style_Screen(tx_screen);
+  lv_obj_set_scrollable(tx_screen, false);
+  lv_obj_set_scrollbar_mode(tx_screen, LV_SCROLLBAR_MODE_OFF);
+  Style_Screen(tx_history_screen);
+  lv_obj_set_scrollable(tx_history_screen, false);
+  lv_obj_set_scrollbar_mode(tx_history_screen, LV_SCROLLBAR_MODE_OFF);
   Style_Screen(scanner_screen);
   lv_obj_set_style_text_font(info_screen, &ui_font_cyrillic_14, 0);
 
@@ -2781,9 +2896,11 @@ void Ui_Init(void)
                       LV_EVENT_SCREEN_LOADED, NULL);
 
   (void)Create_NavigationButton(tx_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
-  title = Create_Label(tx_screen, 56, 10, 416, "CANopen SDO client",
+  title = Create_Label(tx_screen, 56, 10, 366, "CANopen SDO client",
                        lv_color_hex(0x65C7F7));
   lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+  (void)Create_NavigationButton(tx_screen, 432, 3, 44, 34,
+                                LV_SYMBOL_LIST, tx_history_screen);
 
   (void)Create_Label(tx_screen, 8, 53, 38, "Node", lv_color_hex(0xA9C7D7));
   tx_node_textarea = lv_textarea_create(tx_screen);
@@ -2881,6 +2998,38 @@ void Ui_Init(void)
   lv_obj_add_event_cb(tx_screen, Tx_ScreenLoaded, LV_EVENT_SCREEN_LOADED, NULL);
   tx_command = CAN_TX_SDO_READ;
   Tx_UpdateFormLabels();
+
+  (void)Create_NavigationButton(tx_history_screen, 4, 3, 44, 34,
+                                LV_SYMBOL_LEFT, tx_screen);
+  title = Create_Label(tx_history_screen, 58, 10, 410, "SDO request history",
+                       lv_color_hex(0x65C7F7));
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+  tx_history_empty_label = Create_Label(tx_history_screen, 8, 128, 464,
+                                        "No saved requests",
+                                        lv_color_hex(0x78909C));
+  lv_obj_set_style_text_align(tx_history_empty_label, LV_TEXT_ALIGN_CENTER, 0);
+  for (row = 0U; row < SDO_HISTORY_CAPACITY; ++row)
+  {
+    tx_history_buttons[row] = lv_button_create(tx_history_screen);
+    lv_obj_set_pos(tx_history_buttons[row], 8, 39 + (int32_t)(row * 23U));
+    lv_obj_set_size(tx_history_buttons[row], 464, 22);
+    lv_obj_set_style_bg_color(tx_history_buttons[row],
+                              lv_color_hex((row & 1U) == 0U ? 0x17242B : 0x132027), 0);
+    lv_obj_set_style_bg_color(tx_history_buttons[row], lv_color_hex(0x17698C),
+                              LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(tx_history_buttons[row], 0, 0);
+    lv_obj_set_style_radius(tx_history_buttons[row], 0, 0);
+    lv_obj_set_style_pad_all(tx_history_buttons[row], 0, 0);
+    lv_obj_add_event_cb(tx_history_buttons[row], TxHistory_Selected,
+                        LV_EVENT_CLICKED, (void *)(uintptr_t)row);
+    tx_history_labels[row] = lv_label_create(tx_history_buttons[row]);
+    lv_obj_set_pos(tx_history_labels[row], 8, 3);
+    lv_obj_set_width(tx_history_labels[row], 448);
+    lv_obj_set_style_text_font(tx_history_labels[row], &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(tx_history_labels[row], lv_color_hex(0xE8EEF2), 0);
+    lv_label_set_long_mode(tx_history_labels[row], LV_LABEL_LONG_DOT);
+  }
+  TxHistory_Refresh();
 
   (void)Create_NavigationButton(log_screen, 4, 3, 44, 34, LV_SYMBOL_HOME, main_screen);
   title = Create_Label(log_screen, 58, 10, 410, "microSD logging", lv_color_hex(0x65C7F7));
@@ -3415,6 +3564,11 @@ void Ui_Init(void)
 
   history_write = 0U;
   history_count = 0U;
+  taskENTER_CRITICAL();
+  capture_history_read = capture_history_write;
+  capture_reset_write = capture_history_write;
+  capture_observed_reset_generation = capture_reset_generation;
+  taskEXIT_CRITICAL();
   display_paused = false;
   programmatic_scroll = false;
   node_snapshot_count = 0U;
@@ -3435,24 +3589,84 @@ void Ui_Init(void)
   lv_screen_load(main_screen);
 }
 
-void Ui_ProcessFrame(const CanFrameRecord *frame)
+void Ui_SubmitFrame(const CanFrameRecord *frame)
 {
-  if ((frame == NULL) || display_paused)
+  uint32_t write;
+
+  if (frame == NULL)
   {
     return;
   }
 
-  history[history_write & UI_HISTORY_MASK] = *frame;
-  ++history_write;
-  if (history_count < UI_HISTORY_LENGTH)
+  /* Producers only update the capture ring. LVGL consumes a recent snapshot
+     at a bounded rate, so full-screen redraws never back-pressure CAN RX. */
+  taskENTER_CRITICAL();
+  write = capture_history_write;
+  capture_history[write & UI_HISTORY_MASK] = *frame;
+  __DMB();
+  capture_history_write = write + 1U;
+  taskEXIT_CRITICAL();
+}
+
+void Ui_ResetFrameHistory(void)
+{
+  taskENTER_CRITICAL();
+  capture_reset_write = capture_history_write;
+  ++capture_reset_generation;
+  taskEXIT_CRITICAL();
+}
+
+static void Ui_SampleFrameHistory(void)
+{
+  uint32_t write;
+  uint32_t reset_write;
+  uint32_t reset_generation;
+  bool copied = false;
+  bool reset = false;
+
+  taskENTER_CRITICAL();
+  reset_generation = capture_reset_generation;
+  reset_write = capture_reset_write;
+  if (capture_observed_reset_generation != reset_generation)
   {
-    ++history_count;
+    capture_observed_reset_generation = reset_generation;
+    capture_history_read = reset_write;
+    history_write = 0U;
+    history_count = 0U;
+    reset = true;
   }
-  rows_dirty = true;
+
+  if (!display_paused)
+  {
+    write = capture_history_write;
+    if ((write - capture_history_read) > UI_HISTORY_LENGTH)
+    {
+      capture_history_read = write - UI_HISTORY_LENGTH;
+    }
+    while (capture_history_read != write)
+    {
+      history[history_write & UI_HISTORY_MASK] =
+        capture_history[capture_history_read & UI_HISTORY_MASK];
+      ++capture_history_read;
+      ++history_write;
+      if (history_count < UI_HISTORY_LENGTH)
+      {
+        ++history_count;
+      }
+      copied = true;
+    }
+  }
+  taskEXIT_CRITICAL();
+
+  if (copied || reset)
+  {
+    rows_dirty = true;
+  }
 }
 
 void Ui_TaskLoop(void)
 {
+  static uint32_t last_frame_sample;
   static uint32_t last_status_update;
   static uint32_t last_analyzer_update;
   CanCaptureStatus status;
@@ -3461,13 +3675,20 @@ void Ui_TaskLoop(void)
 
   CanScanner_Update();
 
+  if (((uint32_t)(now - last_frame_sample) >= UI_FRAME_SAMPLE_MS) ||
+      (capture_observed_reset_generation != capture_reset_generation))
+  {
+    Ui_SampleFrameHistory();
+    last_frame_sample = now;
+  }
+
   if (display_backlight_on &&
       ((now - display_last_touch_ms) >= DISPLAY_IDLE_TIMEOUT_MS))
   {
     Display_SetBacklight(false);
   }
 
-  if (rows_dirty)
+  if (rows_dirty && (lv_screen_active() == monitor_screen))
   {
     uint32_t content_height = history_count * UI_ROW_HEIGHT;
     if (content_height < UI_TABLE_HEIGHT)
@@ -3503,8 +3724,7 @@ void Ui_TaskLoop(void)
     lv_obj_set_hidden(scanner_indicator_label,
                       !scanner_status.running ||
                       (lv_screen_active() == scanner_screen));
-    drops = status.ring_overflows + status.gui_overflows +
-            CanopenAnalyzer_GetQueueOverflows();
+    drops = status.ring_overflows + CanopenAnalyzer_GetQueueOverflows();
     (void)snprintf(text, sizeof(text), "CAN %s%s%s %luk RX:%lu D:%lu E:%lu",
                    operating, display_paused ? "PAUSE/" : "", state,
                    (unsigned long)status.bitrate_kbps,

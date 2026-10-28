@@ -25,6 +25,7 @@ set(CAN_SNIFFER_SOURCES
     Core/Src/network_service.c
     Core/Src/platform.c
     Core/Src/qspi_store.c
+    Core/Src/sdo_history.c
     Core/Src/sd_diskio.c
     Core/Src/sdmmc.c
     Core/Src/stm32f7xx_hal_msp.c
