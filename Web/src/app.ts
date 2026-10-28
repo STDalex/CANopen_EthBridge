@@ -498,7 +498,9 @@ async function refreshStatus(): Promise<void> {
     text('can-state', state.can.state);
     text('bus-load', `${(stats.can.bus_load_permille / 10).toFixed(1)} %`);
     text('traffic-total', `${formatInt(stats.can.received)} кадров`);
-    text('can-drops', formatInt(stats.can.ring_overflows + stats.can.gui_overflows + stats.analyzer.queue_overflows));
+    text('can-loss', formatInt(stats.can.ring_overflows));
+    text('display-skips', formatInt(stats.can.gui_overflows));
+    text('analyzer-loss', formatInt(stats.analyzer.queue_overflows));
     text('can-errors', formatInt(stats.can.errors));
     renderErrorStatistics(stats.can);
     text('log-mode', modeName(state.storage.mode));
@@ -810,7 +812,9 @@ async function resetStatistics(): Promise<void> {
     renderNodes();
     renderVisibleFrames();
     text('traffic-total', '0 кадров');
-    text('can-drops', '0');
+    text('can-loss', '0');
+    text('display-skips', '0');
+    text('analyzer-loss', '0');
     text('can-errors', '0');
     renderErrorStatistics(emptyCanStatistics);
     await refreshNodes();

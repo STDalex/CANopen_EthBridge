@@ -778,6 +778,7 @@ static void Tx_EndEditing(void)
   lv_keyboard_set_textarea(tx_keyboard, NULL);
   lv_obj_set_hidden(tx_keyboard, true);
   lv_obj_set_hidden(tx_edit_panel, true);
+  lv_obj_scroll_to(tx_screen, 0, 0, LV_ANIM_OFF);
 }
 
 static const char *Tx_FieldName(lv_obj_t *field)
@@ -793,7 +794,10 @@ static const char *Tx_FieldName(lv_obj_t *field)
 static void Tx_BeginEditing(lv_obj_t *field)
 {
   if (lv_obj_has_state(field, LV_STATE_DISABLED)) return;
-  if ((tx_active_field != NULL) && (tx_active_field != field)) Tx_EndEditing();
+  /* A second tap is used to move the textarea cursor. Do not overwrite the
+     saved normal geometry with the temporary full-width edit geometry. */
+  if (tx_active_field == field) return;
+  if (tx_active_field != NULL) Tx_EndEditing();
   tx_field_x = lv_obj_get_x(field);
   tx_field_y = lv_obj_get_y(field);
   tx_field_width = lv_obj_get_width(field);
@@ -2621,6 +2625,8 @@ void Ui_Init(void)
   Style_Screen(info_screen);
   Style_Screen(log_screen);
   Style_Screen(tx_screen);
+  lv_obj_set_scrollable(tx_screen, false);
+  lv_obj_set_scrollbar_mode(tx_screen, LV_SCROLLBAR_MODE_OFF);
   Style_Screen(scanner_screen);
   lv_obj_set_style_text_font(info_screen, &ui_font_cyrillic_14, 0);
 

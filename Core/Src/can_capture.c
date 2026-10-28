@@ -65,6 +65,22 @@ static volatile bool tx_gate_enabled;
 static volatile bool active_latched;
 static TaskHandle_t consumer_task;
 
+static uint64_t ReadEstimatedBusyTimeNs(void)
+{
+  uint64_t value;
+  uint32_t primask = __get_PRIMASK();
+
+  /* CAN RX runs above configMAX_SYSCALL_INTERRUPT_PRIORITY, so a normal
+     FreeRTOS critical section cannot make this 64-bit load atomic. */
+  __disable_irq();
+  value = estimated_busy_time_ns;
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+  return value;
+}
+
 void CanSafety_EmergencyDisableTx(void)
 {
   uint32_t shift = 9U * 2U;
@@ -277,8 +293,6 @@ bool CanCapture_Pop(CanFrameRecord *frame)
 
 void CanCapture_RxIRQHandler(void)
 {
-  BaseType_t higher_priority_task_woken = pdFALSE;
-
   while ((CAN1->RF0R & CAN_RF0R_FMP0) != 0U)
   {
     uint32_t write_index = ring_write;
@@ -351,6 +365,16 @@ void CanCapture_RxIRQHandler(void)
     CAN1->RF0R = CAN_RF0R_FOVR0;
     ++ring_overflow_count;
   }
+
+  /* RX0 priority is intentionally above the FreeRTOS syscall ceiling.  Pend
+     CAN1_TX as a software-only, RTOS-safe deferred interrupt instead of
+     calling any FromISR API here. */
+  NVIC_SetPendingIRQ(CAN1_TX_IRQn);
+}
+
+void CanCapture_DeferredIRQHandler(void)
+{
+  BaseType_t higher_priority_task_woken = pdFALSE;
 
   if (consumer_task != NULL)
   {
@@ -590,12 +614,13 @@ void CanControl_GetStatus(CanCaptureStatus *status)
   taskENTER_CRITICAL();
   if ((uint32_t)(now - load_window_started_tick) >= 1000U)
   {
+    uint64_t busy_total = ReadEstimatedBusyTimeNs();
     uint32_t elapsed_ms = now - load_window_started_tick;
-    uint64_t busy_time_ns = estimated_busy_time_ns - load_window_busy_base;
+    uint64_t busy_time_ns = busy_total - load_window_busy_base;
     uint64_t load_permille = busy_time_ns / ((uint64_t)elapsed_ms * 1000U);
     if (load_permille > 1000U) load_permille = 1000U;
     current_bus_load_permille = (uint16_t)load_permille;
-    load_window_busy_base = estimated_busy_time_ns;
+    load_window_busy_base = busy_total;
     load_window_started_tick = now;
   }
   status->bitrate_kbps = active_bitrate;
@@ -629,7 +654,7 @@ void CanControl_ResetStatistics(void)
   ring_overflow_statistics_base = ring_overflow_count;
   gui_overflow_statistics_base = gui_overflow_count;
   error_statistics = (CanErrorStatistics){0};
-  load_window_busy_base = estimated_busy_time_ns;
+  load_window_busy_base = ReadEstimatedBusyTimeNs();
   load_window_started_tick = HAL_GetTick();
   current_bus_load_permille = 0U;
   taskEXIT_CRITICAL();

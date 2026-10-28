@@ -16,9 +16,9 @@
   <main>
     <section class="metrics" aria-label="Состояние устройства">
       <article><span>Скорость CAN</span><strong id="can-rate">—</strong><small id="can-state">ожидание</small></article>
-      <article><span>Загрузка шины</span><strong id="bus-load">—</strong><small><span id="traffic-total">0 кадров</span> · DROP <span id="can-drops">0</span> · ERR <span id="can-errors">0</span></small></article>
+      <article><span>Загрузка шины</span><strong id="bus-load">—</strong><small class="metric-details"><span id="traffic-total">0 кадров</span><span>CAN LOSS <b id="can-loss">0</b></span><span>DISPLAY SKIP <b id="display-skips">0</b></span><span>ANALYZER LOSS <b id="analyzer-loss">0</b></span><span>ERR <b id="can-errors">0</b></span></small></article>
       <article><span>Запись</span><strong id="log-mode">—</strong><small><span id="log-file">нет файла</span> · свободно <span id="log-free">—</span></small></article>
-      <article><span>Live stream</span><strong id="live-rate">0 кадр/с</strong><small><span id="gap-count">0</span> пропущено · <span id="gap-blocks">0</span> разрывов</small></article>
+      <article><span>Live stream</span><strong id="live-rate">0 кадр/с</strong><small class="metric-details"><span>WEB MISSED <b id="gap-count">0</b></span><span>WEB GAPS <b id="gap-blocks">0</b></span></small></article>
     </section>
 
     <nav class="tabs" aria-label="Разделы">
@@ -198,7 +198,15 @@
             <div><dt>DLC и данные</dt><dd>Количество байт и содержимое кадра в порядке передачи. Многобайтные значения CANopen обычно имеют порядок LSB first.</dd></div>
           </dl>
           <p><strong>Пауза</strong> останавливает только перерисовку таблицы — приём CAN продолжается. «Очистить» удаляет браузерный буфер, но не сбрасывает аппаратную статистику.</p>
-          <div class="help-note"><strong>DROP и разрывы.</strong> DROP означает переполнение очередей устройства; «пропущено» и «разрывы» относятся к WebSocket-потоку браузера. Кадры могли быть приняты анализатором или записаны на SD, но не успеть попасть на экран.</div>
+          <h3>Потери, пропуски и разрывы</h3>
+          <dl class="help-definitions">
+            <div><dt>CAN LOSS</dt><dd>Кадры, потерянные до обработки всей системой: переполнилось входное программное кольцо или аппаратный FIFO CAN. Такой кадр не увидят анализатор, логгер, экран и WebSocket.</dd></div>
+            <div><dt>DISPLAY SKIP</dt><dd>Кадр принят, но очередь физического экрана STM32 была заполнена. Это допустимая потеря визуализации; анализатор, логгер и WebSocket продолжают работать.</dd></div>
+            <div><dt>ANALYZER LOSS</dt><dd>Кадр принят, но не попал в CANopen-анализатор из-за заполненной очереди. Raw-кадр при этом мог быть записан или передан в браузер.</dd></div>
+            <div><dt>WEB MISSED</dt><dd>Число отдельных кадров, отсутствующих в последовательности WebSocket браузера. Они могли остаться в анализаторе или на microSD.</dd></div>
+            <div><dt>WEB GAPS</dt><dd>Число эпизодов разрыва последовательности. Если после SEQ 100 пришёл SEQ 110, это один разрыв и девять пропущенных кадров. Переподключение браузера также может создать разрыв.</dd></div>
+          </dl>
+          <div class="help-note"><strong>Главный показатель сохранности — CAN LOSS.</strong> Рост DISPLAY SKIP не означает потери на шине. Для гарантированного хранения полного потока включайте запись на microSD и дополнительно контролируйте счётчик потерянных кадров логгера.</div>
           <p>Загрузка шины оценивается по скорости, формату, DLC и ожидаемому bit stuffing за последнюю секунду. Это полезная оценка, а не измерение осциллографом.</p>
         </article>
 
@@ -238,8 +246,9 @@
           <ul>
             <li><strong>Auto</strong> пассивно перебирает скорости и выбирает вариант с достоверными кадрами. Во время поиска мост не должен передавать.</li>
             <li><strong>Ручной режим</strong> сразу фиксирует выбранную скорость. Он предпочтителен для известной шины и при очень редком трафике.</li>
-            <li><strong>SILENT</strong> разрешает только приём. <strong>ACTIVE</strong> включает ACK и передачу SDO/NMT; его нужно включать только после определения скорости.</li>
+            <li><strong>SILENT</strong> разрешает только приём и не выставляет ACK. <strong>ACTIVE</strong> включает ACK и передачу SDO/NMT; его нужно включать только после определения скорости.</li>
           </ul>
+          <div class="help-note"><strong>Повторяющийся Boot-up без ACK.</strong> Если CanSniff — единственный приёмник и находится в SILENT, передающая нода не видит dominant-бит в ACK slot и автоматически повторяет тот же кадр. Например, непрерывный <code>0x700 + Node</code> с данными <code>00</code> обычно означает ретрансляцию одного Boot-up, а не постоянную перезагрузку ноды. После проверки bitrate переведите мост в ACTIVE либо подключите другого активного участника, способного подтверждать кадры.</div>
           <p>Неверная скорость обычно проявляется отсутствием осмысленных кадров и ростом Stuff/Form/CRC/Bit ошибок. При высокой загрузке автоопределение может найти скорость быстро, но браузерный поток начнёт терять кадры раньше аппаратного анализатора.</p>
           <p>Bridge-сессия получает эксклюзивное управление SDO: обычные запросы Web UI временно блокируются, а мониторинг и запись продолжаются.</p>
         </article>
@@ -257,7 +266,7 @@
               <tr><td>RPDO1…4</td><td><code>0x200/300/400/500 + Node</code></td><td>Процессные команды от сети к ноде.</td></tr>
               <tr><td>SDO response</td><td><code>0x580 + Node</code></td><td>Ответ SDO-сервера ноды, включая успешное чтение/запись или Abort.</td></tr>
               <tr><td>SDO request</td><td><code>0x600 + Node</code></td><td>Запрос клиента к Object Dictionary ноды.</td></tr>
-              <tr><td>HB/Guard</td><td><code>0x700 + Node</code></td><td>Boot-up <code>00</code> или состояние: Stopped <code>04</code>, Operational <code>05</code>, Pre-operational <code>7F</code>.</td></tr>
+              <tr><td>HB/Guard</td><td><code>0x700 + Node</code></td><td>Однократный Boot-up <code>00</code> или состояние: Stopped <code>04</code>, Operational <code>05</code>, Pre-operational <code>7F</code>. Без ACK контроллер передатчика может многократно повторять тот же Boot-up.</td></tr>
               <tr><td>LSS</td><td><code>0x7E4 / 0x7E5</code></td><td>Настройка Node ID и bitrate устройств, поддерживающих Layer Setting Services.</td></tr>
             </tbody>
           </table></div>

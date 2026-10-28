@@ -38,6 +38,13 @@
 #define WEBSOCKET_TX_MAX_BYTES       (4U + WEBSOCKET_PAYLOAD_MAX_BYTES)
 #define WEBSOCKET_MAGIC              0x53575343UL /* "CSWS", little-endian. */
 #define WEBSOCKET_PROTOCOL_VERSION   1U
+#define WEBSOCKET_AGGREGATION_MS      5U
+#define WEBSOCKET_AGGREGATION_POLL_MS 1U
+#define WEBSOCKET_CONTROL_POLL_MS     20U
+#define WEBSOCKET_DRAIN_BACKLOG       (2U * WEBSOCKET_BATCH_MAX_FRAMES)
+#define WEBSOCKET_CRITICAL_BACKLOG    ((3U * WEBSOCKET_RING_CAPACITY) / 4U)
+#define WEBSOCKET_BASE_PRIORITY       (tskIDLE_PRIORITY + 1U)
+#define WEBSOCKET_DRAIN_PRIORITY      (tskIDLE_PRIORITY + 2U)
 #define BRIDGE_WS_RX_BYTES           768U
 #define BRIDGE_WS_TEXT_BYTES         512U
 #define BRIDGE_PING_INTERVAL_MS      2000U
@@ -822,7 +829,8 @@ receive_more:
 }
 
 static uint32_t WebSocketCopyBatch(uint32_t *sequence, uint32_t *lost,
-                                   CanFrameRecord *frames)
+                                   CanFrameRecord *frames,
+                                   uint32_t *remaining)
 {
   uint32_t available;
   uint32_t count;
@@ -842,6 +850,10 @@ static uint32_t WebSocketCopyBatch(uint32_t *sequence, uint32_t *lost,
   {
     frames[index] = websocket_ring[(*sequence + index) &
                                     (WEBSOCKET_RING_CAPACITY - 1U)];
+  }
+  if (remaining != NULL)
+  {
+    *remaining = available - count;
   }
   taskEXIT_CRITICAL();
   return count;
@@ -883,6 +895,10 @@ static void WebSocketLiveRun(struct netconn *connection)
   char hello[128];
   uint32_t sequence;
   uint32_t lost = 0U;
+  uint32_t aggregation_started_tick = 0U;
+  uint32_t last_control_tick = 0U;
+  bool drain_mode = false;
+  bool priority_boosted = false;
   int hello_length;
 
   taskENTER_CRITICAL();
@@ -903,19 +919,68 @@ static void WebSocketLiveRun(struct netconn *connection)
 
   netconn_set_recvtimeout(connection, 1);
   netconn_set_sendtimeout(connection, 1000);
+  last_control_tick = HAL_GetTick();
   for (;;)
   {
     uint32_t count;
+    uint32_t remaining = 0U;
+    uint32_t backlog;
+    uint32_t now = HAL_GetTick();
     size_t payload_length;
-    if (!WebSocketReadControl(connection))
+    if ((!drain_mode ||
+         ((uint32_t)(now - last_control_tick) >= WEBSOCKET_CONTROL_POLL_MS)) &&
+        !WebSocketReadControl(connection))
     {
       break;
     }
-    count = WebSocketCopyBatch(&sequence, &lost, frames);
+    if (!drain_mode ||
+        ((uint32_t)(now - last_control_tick) >= WEBSOCKET_CONTROL_POLL_MS))
+    {
+      last_control_tick = HAL_GetTick();
+    }
+    count = WebSocketCopyBatch(&sequence, &lost, frames, &remaining);
     if (count == 0U)
     {
-      vTaskDelay(pdMS_TO_TICKS(5U));
+      aggregation_started_tick = 0U;
+      drain_mode = false;
+      if (priority_boosted)
+      {
+        vTaskPrioritySet(NULL, WEBSOCKET_BASE_PRIORITY);
+        priority_boosted = false;
+      }
+      vTaskDelay(pdMS_TO_TICKS(WEBSOCKET_AGGREGATION_MS));
       continue;
+    }
+    backlog = count + remaining;
+    drain_mode = backlog >= WEBSOCKET_DRAIN_BACKLOG;
+
+    /* With a light stream, wait briefly so several CAN frames share one TCP
+       segment. Once one complete batch is queued, start draining immediately. */
+    if ((count < WEBSOCKET_BATCH_MAX_FRAMES) && !drain_mode)
+    {
+      now = HAL_GetTick();
+      if (aggregation_started_tick == 0U)
+      {
+        aggregation_started_tick = now;
+      }
+      if ((uint32_t)(now - aggregation_started_tick) <
+          WEBSOCKET_AGGREGATION_MS)
+      {
+        vTaskDelay(pdMS_TO_TICKS(WEBSOCKET_AGGREGATION_POLL_MS));
+        continue;
+      }
+    }
+    aggregation_started_tick = 0U;
+
+    if ((backlog >= WEBSOCKET_CRITICAL_BACKLOG) && !priority_boosted)
+    {
+      vTaskPrioritySet(NULL, WEBSOCKET_DRAIN_PRIORITY);
+      priority_boosted = true;
+    }
+    else if ((backlog < WEBSOCKET_DRAIN_BACKLOG) && priority_boosted)
+    {
+      vTaskPrioritySet(NULL, WEBSOCKET_BASE_PRIORITY);
+      priority_boosted = false;
     }
     payload_length = WebSocketBuildBatch(transmit + 4U, frames, count,
                                           sequence, lost);
@@ -947,9 +1012,10 @@ static void WebSocketLiveRun(struct netconn *connection)
     sequence += count;
     StatusIncrement(&public_status.websocket_batches);
     StatusAdd(&public_status.websocket_frames, count);
-    /* A short aggregation window keeps live latency low while avoiding one
-       TCP/WebSocket packet per CAN frame on a busy bus. */
-    vTaskDelay(pdMS_TO_TICKS(5U));
+  }
+  if (priority_boosted)
+  {
+    vTaskPrioritySet(NULL, WEBSOCKET_BASE_PRIORITY);
   }
 }
 
@@ -1284,7 +1350,7 @@ static void BridgeWebSocketRun(struct netconn *connection, uint32_t session_id)
       }
     }
 
-    count = WebSocketCopyBatch(&bridge_stream_sequence, &lost, frames);
+    count = WebSocketCopyBatch(&bridge_stream_sequence, &lost, frames, NULL);
     if (count != 0U)
     {
       payload_length = WebSocketBuildBatch(transmit + 4U, frames, count,
@@ -3264,7 +3330,7 @@ void ApiServer_Run(void)
   bridge_stream_sequence = 0U;
   websocket_task_handle = xTaskCreateStatic(WebSocketTask, "wsLiveTask",
                                              WEBSOCKET_TASK_STACK_WORDS, NULL,
-                                             tskIDLE_PRIORITY + 1U,
+                                             WEBSOCKET_BASE_PRIORITY,
                                              websocket_task_stack,
                                              &websocket_task_control);
   bridge_task_handle = xTaskCreateStatic(BridgeWebSocketTask, "wsBridgeTask",
