@@ -185,6 +185,11 @@ bool CanBridge_Enable(uint32_t *session_id)
     return false;
   }
   if (!CanTx_SetBridgeExclusive(true)) return false;
+  if (!CanControl_RequestActive(true))
+  {
+    (void)CanTx_SetBridgeExclusive(false);
+    return false;
+  }
 
   taskENTER_CRITICAL();
   if (bridge.status.active)

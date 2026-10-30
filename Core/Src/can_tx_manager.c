@@ -968,11 +968,12 @@ static uint32_t ProcessEntry(const CanTxQueueEntry *entry, uint32_t last_attempt
   if (!entry->periodic)
   {
     taskENTER_CRITICAL();
-    /* A scanner pass is a sequence of one-shot SDO reads and owns TX for its
-       whole lifetime. Returning to silent after every node would tear down
-       that pass and be reported as a CAN error. Normal one-shot requests keep
-       the original fail-safe auto-silent behaviour. */
+    /* Scanner and bridge sessions own TX for their whole lifetime. Returning
+       to silent after every one-shot request would repeatedly reconfigure the
+       controller between requests. Normal one-shot requests keep the original
+       fail-safe auto-silent behaviour. */
     if ((tx_owner != CAN_TX_OWNER_SCANNER) &&
+        (entry->owner != CAN_TX_OWNER_BRIDGE) &&
         !CanControl_IsActiveLatched())
     {
       auto_silent_deadline = HAL_GetTick() + entry->frame.timeout_ms;

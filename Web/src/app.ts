@@ -17,7 +17,7 @@ interface LogListResponse { count: number; total: number; limit: number; order: 
 type TxMode = 'silent' | 'active_pending' | 'active';
 type SdoCommand = 'read' | 'write_u8' | 'write_u16' | 'write_u24' | 'write_u32';
 type NmtCommand = 'start' | 'stop' | 'pre_operational' | 'reset_node' | 'reset_communication';
-interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean; bridge_active: boolean }
+interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; active_latched: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean; bridge_active: boolean }
 interface CanTxStatus { queue_depth: number; queue_capacity: number; transmitting: boolean; queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number; last_sequence: number; last_result: string; rate_limit_fps: number; periodic_active: boolean; periodic_sequence: number; periodic_period_ms: number; periodic_attempts: number }
 interface CanTxResponse { timestamp_us: number; response_time_us: number; can_id: number; dlc: number; raw: number[] }
 interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; type?: 'nmt'; node_id: number; command: SdoCommand | NmtCommand; index?: number; subindex?: number; value?: number; can_id: number; raw: number[]; timeout_ms: number; has_response?: boolean; response?: CanTxResponse }
@@ -64,9 +64,10 @@ let lastRateFrames = 0;
 let lastRateTime = performance.now();
 let liveRate = 0;
 let totalLiveFrames = 0;
-let txMode: CanModeStatus = { mode: 'silent', tx_gate_enabled: false, bitrate_kbps: 0, sync_state: 'searching', safety_reason: 'power_on', queue_depth: 0, transmitting: false, bridge_active: false };
+let txMode: CanModeStatus = { mode: 'silent', tx_gate_enabled: false, active_latched: false, bitrate_kbps: 0, sync_state: 'searching', safety_reason: 'power_on', queue_depth: 0, transmitting: false, bridge_active: false };
 let txStatus: CanTxStatus = { queue_depth: 0, queue_capacity: 16, transmitting: false, queued: 0, sent: 0, cancelled: 0, timeouts: 0, arbitration_lost: 0, bus_off: 0, errors: 0, last_sequence: 0, last_result: 'mode_disabled', rate_limit_fps: 20, periodic_active: false, periodic_sequence: 0, periodic_period_ms: 0, periodic_attempts: 0 };
 let lastSubmittedSequence = 0;
+let canModeChanging = false;
 const emptyCanStatistics: Statistics['can'] = {
   received: 0, ring_overflows: 0, gui_overflows: 0, errors: 0, bus_load_permille: 0,
   error_counters: { interrupts: 0, warning: 0, passive: 0, bus_off: 0, stuff: 0, form: 0, ack: 0, bit_recessive: 0, bit_dominant: 0, crc: 0, unclassified: 0 },
@@ -340,7 +341,28 @@ function flushFrames(): void {
   flushTimer = window.setTimeout(flushFrames, 100);
 }
 
+function renderCanModeToggle(): void {
+  const button = $<HTMLButtonElement>('can-mode-toggle');
+  const pending = txMode.mode === 'active_pending';
+  const active = txMode.mode === 'active';
+  button.textContent = canModeChanging ? 'CAN: ПЕРЕКЛЮЧЕНИЕ…' : pending ? 'CAN: ACTIVE…' : active ? 'CAN: ACTIVE' : 'CAN: SILENT';
+  button.classList.toggle('is-active', active);
+  button.classList.toggle('is-pending', pending || canModeChanging);
+  button.classList.toggle('is-silent', !active && !pending && !canModeChanging);
+  button.setAttribute('aria-pressed', String(active || pending));
+  button.disabled = canModeChanging || txMode.bridge_active ||
+    (txMode.mode === 'silent' && (!txMode.bitrate_kbps || txMode.sync_state === 'searching'));
+  button.title = txMode.bridge_active
+    ? 'Режимом CAN управляет Bridge-клиент'
+    : button.disabled && txMode.mode === 'silent'
+    ? 'Сначала выберите или определите скорость CAN'
+    : active || pending
+    ? 'Перевести CAN-контроллер в SILENT'
+    : 'Перевести CAN-контроллер в ACTIVE';
+}
+
 function renderTxControls(): void {
+  renderCanModeToggle();
   const periodic = txStatus.periodic_active;
   const busy = txStatus.transmitting || txStatus.queue_depth > 0;
   const bridge = txMode.bridge_active;
@@ -378,6 +400,26 @@ async function refreshTx(showError = false): Promise<void> {
     renderTxControls();
   } catch (error) {
     if (showError) notify(error instanceof Error ? error.message : 'Состояние TX недоступно', true);
+  }
+}
+
+async function toggleCanMode(): Promise<void> {
+  if (canModeChanging || txMode.bridge_active) return;
+  const target: 'active' | 'silent' = txMode.mode === 'silent' ? 'active' : 'silent';
+  canModeChanging = true;
+  renderCanModeToggle();
+  try {
+    txMode = await api<CanModeStatus>('/api/v1/can/mode', {
+      method: 'POST',
+      body: JSON.stringify(target === 'active' ? { mode: target, confirmed: true } : { mode: target })
+    });
+    notify(`CAN переведён в ${target.toUpperCase()}`);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'Не удалось переключить режим CAN', true);
+  } finally {
+    canModeChanging = false;
+    renderTxControls();
+    window.setTimeout(() => void refreshTx(), 100);
   }
 }
 
@@ -892,6 +934,7 @@ function bindUi(): void {
   $('logs-next').onclick = () => void navigateToLogPage(logPage + 1);
   $<HTMLSelectElement>('log-page-select').onchange = event => void navigateToLogPage(Number((event.target as HTMLSelectElement).value));
   $('reset-statistics').onclick = () => void resetStatistics();
+  $('can-mode-toggle').onclick = () => void toggleCanMode();
   document.querySelectorAll<HTMLButtonElement>('[data-node-view]').forEach(button => button.onclick = () => {
     document.querySelectorAll('[data-node-view]').forEach(item => item.classList.remove('active'));
     button.classList.add('active'); nodeView = button.dataset.nodeView as typeof nodeView; if (selectedNode) void loadNodeEvents(selectedNode, true);

@@ -209,6 +209,8 @@ static lv_obj_t *main_storage_label;
 static lv_obj_t *pause_button_label;
 static lv_obj_t *main_log_button;
 static lv_obj_t *main_log_button_label;
+static lv_obj_t *main_can_mode_button;
+static lv_obj_t *main_can_mode_button_label;
 static lv_obj_t *monitor_log_button;
 static lv_obj_t *monitor_log_button_label;
 static lv_obj_t *nodes_log_button;
@@ -1176,6 +1178,31 @@ static void Reset_StatisticsClicked(lv_event_t *event)
   Render_Rows();
   rows_dirty = false;
   lv_label_set_text(main_status_label, "Statistics reset");
+}
+
+static void Main_CanModeClicked(lv_event_t *event)
+{
+  CanCaptureStatus status;
+  CanScannerStatus scanner_status;
+
+  (void)event;
+  CanControl_GetStatus(&status);
+  CanScanner_GetStatus(&scanner_status);
+  if (CanBridge_IsActive() || scanner_status.running)
+  {
+    return;
+  }
+  if (status.operating_mode == CAN_OPERATING_SILENT)
+  {
+    if (!CanControl_RequestActive(true))
+    {
+      lv_label_set_text(main_status_label, "Select or detect CAN bitrate first");
+    }
+  }
+  else
+  {
+    CanControl_RequestSilent();
+  }
 }
 
 static void Style_Screen(lv_obj_t *screen)
@@ -2740,7 +2767,7 @@ void Ui_Init(void)
   lv_obj_set_style_text_font(info_screen, &ui_font_cyrillic_14, 0);
 
   bridge_indicator_label = lv_label_create(lv_layer_top());
-  lv_obj_set_pos(bridge_indicator_label, 52, 5);
+  lv_obj_set_pos(bridge_indicator_label, 4, 242);
   lv_obj_set_size(bridge_indicator_label, 134, 26);
   lv_obj_set_style_bg_color(bridge_indicator_label, lv_color_hex(0x6D28D9), 0);
   lv_obj_set_style_bg_opa(bridge_indicator_label, LV_OPA_COVER, 0);
@@ -2785,6 +2812,11 @@ void Ui_Init(void)
   lv_obj_set_style_text_align(main_storage_label, LV_TEXT_ALIGN_CENTER, 0);
   reset_button = Create_NavigationButton(main_screen, 4, 3, 44, 34, LV_SYMBOL_REFRESH, main_screen);
   lv_obj_add_event_cb(reset_button, Reset_StatisticsClicked, LV_EVENT_CLICKED, NULL);
+  main_can_mode_button = Create_NavigationButton(main_screen, 52, 3, 112, 34,
+                                                  "CAN SILENT", NULL);
+  main_can_mode_button_label = lv_obj_get_child(main_can_mode_button, 1);
+  lv_obj_add_event_cb(main_can_mode_button, Main_CanModeClicked,
+                      LV_EVENT_CLICKED, NULL);
   main_log_button = Create_QuickLogButton(main_screen, 304, &main_log_button_label);
   (void)Create_NavigationButton(main_screen, 384, 3, 44, 34, "i", info_screen);
   (void)Create_NavigationButton(main_screen, 432, 3, 44, 34, LV_SYMBOL_SETTINGS, settings_screen);
@@ -3719,6 +3751,24 @@ void Ui_TaskLoop(void)
     operating = scanner_status.running ? "SCANNER/" :
                 (bridge_active ? "BRIDGE/" :
                 (tx.periodic_active ? "SDO TIMER/" : ""));
+    if (bridge_active || scanner_status.running ||
+        ((status.operating_mode == CAN_OPERATING_SILENT) &&
+         ((status.bitrate_kbps == 0U) || (status.state == CAN_SYNC_SEARCHING))))
+    {
+      lv_obj_add_state(main_can_mode_button, LV_STATE_DISABLED);
+    }
+    else
+    {
+      lv_obj_remove_state(main_can_mode_button, LV_STATE_DISABLED);
+    }
+    lv_label_set_text(main_can_mode_button_label,
+                      (status.operating_mode == CAN_OPERATING_ACTIVE) ? "CAN ACTIVE" :
+                      ((status.operating_mode == CAN_OPERATING_ACTIVE_PENDING) ?
+                       "CAN ACTIVE..." : "CAN SILENT"));
+    lv_obj_set_style_bg_color(lv_obj_get_child(main_can_mode_button, 0),
+      lv_color_hex((status.operating_mode == CAN_OPERATING_ACTIVE) ? 0x0F766E :
+                   ((status.operating_mode == CAN_OPERATING_ACTIVE_PENDING) ?
+                    0xB45309 : 0x374151)), 0);
     lv_obj_set_hidden(bridge_indicator_label,
                       !bridge_active || (lv_screen_active() != main_screen));
     lv_obj_set_hidden(scanner_indicator_label,
