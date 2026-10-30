@@ -469,6 +469,7 @@ bool CanTx_BuildSdoRequest(const CanTxSdoRequest *request, CanTxFrame *frame)
   }
 
   memset(frame, 0, sizeof(*frame));
+  frame->kind = CAN_TX_FRAME_SDO;
   frame->id = 0x600U + request->node_id;
   frame->timeout_ms = request->timeout_ms;
   frame->dlc = 8U;
@@ -486,7 +487,8 @@ bool CanTx_BuildSdoRequest(const CanTxSdoRequest *request, CanTxFrame *frame)
 bool CanTx_DecodeSdoRequest(const CanTxFrame *frame, CanTxSdoRequest *request)
 {
   uint32_t value;
-  if ((frame == NULL) || (request == NULL) || frame->extended || frame->remote ||
+  if ((frame == NULL) || (request == NULL) ||
+      (frame->kind != CAN_TX_FRAME_SDO) || frame->extended || frame->remote ||
       (frame->dlc != 8U) || (frame->id < 0x601U) || (frame->id > 0x67FU))
   {
     return false;
@@ -529,6 +531,7 @@ bool CanTx_BuildNmt(CanTxNmtCommand command, uint8_t node_id,
       return false;
   }
   memset(frame, 0, sizeof(*frame));
+  frame->kind = CAN_TX_FRAME_NMT;
   frame->id = 0U;
   frame->timeout_ms = CAN_TX_DEFAULT_TIMEOUT_MS;
   frame->dlc = 2U;
@@ -542,6 +545,7 @@ bool CanTx_DecodeNmt(const CanTxFrame *frame, CanTxNmtCommand *command,
 {
   CanTxNmtCommand decoded;
   if ((frame == NULL) || (command == NULL) || (node_id == NULL) ||
+      (frame->kind != CAN_TX_FRAME_NMT) ||
       frame->extended || frame->remote || (frame->id != 0U) ||
       (frame->dlc != 2U) || (frame->data[1] > 127U)) return false;
   decoded = (CanTxNmtCommand)frame->data[0];
@@ -567,6 +571,16 @@ CanTxSubmitResult CanTx_SubmitNmt(CanTxNmtCommand command, uint8_t node_id,
   CanTxFrame frame;
   if (!CanTx_BuildNmt(command, node_id, &frame)) return CAN_TX_SUBMIT_INVALID;
   return SubmitFrame(&frame, sequence, CAN_TX_OWNER_NORMAL);
+}
+
+CanTxSubmitResult CanTx_SubmitRaw(const CanTxFrame *frame,
+                                 uint32_t *sequence)
+{
+  CanTxFrame raw;
+  if (frame == NULL) return CAN_TX_SUBMIT_INVALID;
+  raw = *frame;
+  raw.kind = CAN_TX_FRAME_RAW;
+  return SubmitFrame(&raw, sequence, CAN_TX_OWNER_NORMAL);
 }
 
 CanTxSubmitResult CanTx_SubmitSdo(const CanTxSdoRequest *request,
@@ -656,17 +670,16 @@ bool CanTx_SetScannerExclusive(bool enabled)
   return accepted;
 }
 
-CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
-                                         uint32_t period_ms,
-                                         uint32_t *sequence)
+static CanTxSubmitResult StartPeriodicFrame(const CanTxFrame *frame,
+                                            uint32_t period_ms,
+                                            uint32_t *sequence)
 {
-  CanTxFrame frame;
   CanCaptureStatus capture;
   uint32_t assigned_sequence;
-  if (!CanTx_BuildSdoRequest(request, &frame) ||
+  if (!ValidateFrame(frame) ||
       (period_ms < CAN_TX_PERIOD_MIN_MS) ||
       (period_ms > CAN_TX_PERIOD_MAX_MS) ||
-      (period_ms < request->timeout_ms))
+      (period_ms < frame->timeout_ms))
   {
     return CAN_TX_SUBMIT_INVALID;
   }
@@ -694,14 +707,14 @@ CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
   taskENTER_CRITICAL();
   assigned_sequence = next_sequence++;
   if (next_sequence == 0U) next_sequence = 1U;
-  periodic_state.frame = frame;
+  periodic_state.frame = *frame;
   periodic_state.sequence = assigned_sequence;
   periodic_state.period_ms = period_ms;
   periodic_state.next_due_tick = HAL_GetTick();
   periodic_state.enabled = true;
   memset(&periodic_history, 0, sizeof(periodic_history));
   periodic_history.sequence = assigned_sequence;
-  periodic_history.frame = frame;
+  periodic_history.frame = *frame;
   periodic_history.periodic = true;
   periodic_history_valid = false;
   public_status.periodic_active = true;
@@ -712,6 +725,26 @@ CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
   taskEXIT_CRITICAL();
   if (sequence != NULL) *sequence = assigned_sequence;
   return CAN_TX_SUBMIT_OK;
+}
+
+CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
+                                         uint32_t period_ms,
+                                         uint32_t *sequence)
+{
+  CanTxFrame frame;
+  if (!CanTx_BuildSdoRequest(request, &frame)) return CAN_TX_SUBMIT_INVALID;
+  return StartPeriodicFrame(&frame, period_ms, sequence);
+}
+
+CanTxSubmitResult CanTx_StartPeriodicRaw(const CanTxFrame *frame,
+                                         uint32_t period_ms,
+                                         uint32_t *sequence)
+{
+  CanTxFrame raw;
+  if (frame == NULL) return CAN_TX_SUBMIT_INVALID;
+  raw = *frame;
+  raw.kind = CAN_TX_FRAME_RAW;
+  return StartPeriodicFrame(&raw, period_ms, sequence);
 }
 
 bool CanTx_StopPeriodic(void)

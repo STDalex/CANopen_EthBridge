@@ -110,18 +110,38 @@
       <div class="tx-layout">
         <form id="tx-form" class="panel form-card tx-form">
           <div class="section-title">
-            <div><span class="eyebrow">CANopen SDO client</span><h2>SDO-запрос</h2></div>
+            <div>
+              <span id="tx-client-eyebrow" class="eyebrow">CANopen SDO client</span>
+              <div class="tx-kind-tabs" role="tablist" aria-label="Тип передачи">
+                <button id="tx-kind-sdo" class="active" type="button" role="tab" aria-selected="true">SDO-запрос</button>
+                <button id="tx-kind-raw" type="button" role="tab" aria-selected="false">Raw CAN</button>
+              </div>
+            </div>
             <div id="tx-mode-status" class="tx-mode-status idle"><span class="dot"></span><strong>Готово</strong></div>
           </div>
-          <div class="tx-safety-note">Отправляются только expedited SDO-запросы. COB-ID клиента вычисляется как 0x600 + Node ID, DLC всегда равен 8.</div>
-          <div class="form-grid tx-fields">
-            <label>Node ID<input id="tx-node" type="number" min="1" max="127" value="1" required></label>
-            <label>Операция<select id="tx-command"><option value="read">Чтение</option><option value="write_u8">Запись 8 бит</option><option value="write_u16">Запись 16 бит</option><option value="write_u24">Запись 24 бита</option><option value="write_u32">Запись 32 бита</option></select></label>
-            <label>Объект, hex<input id="tx-index" value="1018" maxlength="4" autocomplete="off" spellcheck="false"></label>
-            <label>Субиндекс, hex<input id="tx-subindex" value="01" maxlength="2" autocomplete="off" spellcheck="false"></label>
-            <label class="tx-data-field">Значение, hex<input id="tx-value" value="0" maxlength="8" autocomplete="off" spellcheck="false" disabled></label>
-            <label>Timeout, мс<input id="tx-timeout" type="number" min="10" max="1000" value="100" required></label>
-            <label>Период, мс<input id="tx-period" type="number" min="50" max="3600000" value="1000" required></label>
+          <div id="tx-sdo-pane" class="tx-kind-pane" role="tabpanel" aria-labelledby="tx-kind-sdo">
+            <div class="tx-safety-note">Отправляются expedited SDO-запросы. COB-ID клиента вычисляется как 0x600 + Node ID, DLC всегда равен 8.</div>
+            <div class="form-grid tx-fields">
+              <label>Node ID<input id="tx-node" type="number" min="1" max="127" value="1" required></label>
+              <label>Операция<select id="tx-command"><option value="read">Чтение</option><option value="write_u8">Запись 8 бит</option><option value="write_u16">Запись 16 бит</option><option value="write_u24">Запись 24 бита</option><option value="write_u32">Запись 32 бита</option></select></label>
+              <label>Объект, hex<input id="tx-index" value="1018" maxlength="4" autocomplete="off" spellcheck="false"></label>
+              <label>Субиндекс, hex<input id="tx-subindex" value="01" maxlength="2" autocomplete="off" spellcheck="false"></label>
+              <label class="tx-data-field">Значение, hex<input id="tx-value" value="0" maxlength="8" autocomplete="off" spellcheck="false" disabled></label>
+              <label>Timeout, мс<input id="tx-timeout" type="number" min="10" max="1000" value="100" required></label>
+              <label>Период, мс<input id="tx-period" type="number" min="50" max="3600000" value="1000" required></label>
+            </div>
+          </div>
+          <div id="tx-raw-pane" class="tx-kind-pane" role="tabpanel" aria-labelledby="tx-kind-raw" hidden>
+            <div class="tx-safety-note raw-warning"><strong>Raw CAN:</strong> кадр будет передан без проверки протокола CANopen. Проверьте ID, формат и данные перед отправкой.</div>
+            <div class="form-grid tx-fields raw-tx-fields">
+              <label>CAN ID, hex<input id="raw-can-id" value="123" maxlength="8" autocomplete="off" spellcheck="false"></label>
+              <label>Формат<select id="raw-format"><option value="standard">Standard, 11 бит</option><option value="extended">Extended, 29 бит</option></select></label>
+              <label>Тип кадра<select id="raw-frame-type"><option value="data">DATA</option><option value="remote">RTR</option></select></label>
+              <label>DLC<input id="raw-dlc" type="number" min="0" max="8" value="8" required></label>
+              <label class="tx-data-field">Данные, hex-байты<input id="raw-data" value="00 00 00 00 00 00 00 00" maxlength="31" autocomplete="off" spellcheck="false" placeholder="11 22 33 44"></label>
+              <label>Timeout, мс<input id="raw-timeout" type="number" min="10" max="1000" value="100" required></label>
+              <label>Период, мс<input id="raw-period" type="number" min="50" max="3600000" value="1000" required></label>
+            </div>
           </div>
           <div class="tx-actions">
             <button id="tx-send" type="submit">Отправить один раз</button>
@@ -132,12 +152,12 @@
         </form>
 
         <aside class="panel tx-control">
-          <div><span class="eyebrow">SDO client</span><h2>Состояние передачи</h2></div>
+          <div><span id="tx-state-eyebrow" class="eyebrow">SDO client</span><h2>Состояние передачи</h2></div>
           <p id="tx-mode-detail" class="hint">Получение состояния…</p>
           <div id="tx-statistics" class="detail-metrics tx-metrics"></div>
         </aside>
       </div>
-      <div class="panel sdo-recent-panel">
+      <div id="sdo-recent-panel" class="panel sdo-recent-panel">
         <div class="section-title">
           <div><span class="eyebrow">QSPI · последние 10 уникальных</span><h2>История SDO-запросов</h2></div>
           <button id="refresh-sdo-history" type="button" class="ghost" aria-label="Обновить историю SDO">Обновить</button>

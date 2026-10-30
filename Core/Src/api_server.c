@@ -1583,6 +1583,45 @@ static bool JsonReadString(const char *json, const char *key,
   return true;
 }
 
+static int HexDigitValue(char value)
+{
+  if ((value >= '0') && (value <= '9')) return value - '0';
+  if ((value >= 'a') && (value <= 'f')) return value - 'a' + 10;
+  if ((value >= 'A') && (value <= 'F')) return value - 'A' + 10;
+  return -1;
+}
+
+static bool ParseCanData(const char *text, uint8_t data[8], uint8_t *length)
+{
+  uint8_t count = 0U;
+  int high = -1;
+  if ((text == NULL) || (data == NULL) || (length == NULL)) return false;
+  while (*text != '\0')
+  {
+    int digit;
+    if ((*text == ' ') || (*text == '\t') || (*text == '-') || (*text == ':'))
+    {
+      ++text;
+      continue;
+    }
+    digit = HexDigitValue(*text++);
+    if (digit < 0) return false;
+    if (high < 0)
+    {
+      high = digit;
+    }
+    else
+    {
+      if (count >= 8U) return false;
+      data[count++] = (uint8_t)((high << 4) | digit);
+      high = -1;
+    }
+  }
+  if (high >= 0) return false;
+  *length = count;
+  return true;
+}
+
 static bool JsonReadNodeSelection(const char *json, bool selected[128],
                                   bool *present)
 {
@@ -1667,6 +1706,24 @@ static void WriteTxFrame(JsonWriter *writer, const CanTxFrame *frame)
   CanTxNmtCommand nmt_command;
   uint8_t nmt_node_id;
   uint32_t index;
+  if (frame->kind == CAN_TX_FRAME_RAW)
+  {
+    WriterPrintf(writer,
+                 "\"type\":\"raw\",\"can_id\":%lu,\"extended\":%s,"
+                 "\"remote\":%s,\"dlc\":%u,\"raw\":[",
+                 (unsigned long)frame->id,
+                 frame->extended ? "true" : "false",
+                 frame->remote ? "true" : "false",
+                 (unsigned int)frame->dlc);
+    for (index = 0U; !frame->remote && (index < frame->dlc); ++index)
+    {
+      WriterPrintf(writer, "%s%u", index == 0U ? "" : ",",
+                   (unsigned int)frame->data[index]);
+    }
+    WriterPrintf(writer, "],\"timeout_ms\":%u",
+                 (unsigned int)frame->timeout_ms);
+    return;
+  }
   if (CanTx_DecodeNmt(frame, &nmt_command, &nmt_node_id))
   {
     WriterPrintf(writer,
@@ -1768,6 +1825,7 @@ static void HandleRoot(struct netconn *connection)
     "\"/api/v1/config/network\",\"/api/v1/config/can\","
     "\"/api/v1/config/logger\","
     "\"/api/v1/can/mode\",\"/api/v1/can/nmt\",\"/api/v1/can/tx\","
+    "\"/api/v1/can/tx/raw\","
     "\"/api/v1/can/tx/history\",\"/api/v1/can/sdo/history\","
     "\"/api/v1/can/tx/periodic\","
     "\"/api/v1/bridge/enable\",\"/api/v1/bridge/disable\","
@@ -1784,6 +1842,7 @@ static void HandleRoot(struct netconn *connection)
            "\"/api/v1/config/network\",\"/api/v1/config/can\","
            "\"/api/v1/config/logger\","
            "\"/api/v1/can/mode\",\"/api/v1/can/nmt\",\"/api/v1/can/tx\","
+           "\"/api/v1/can/tx/raw\","
            "\"/api/v1/can/tx/history\",\"/api/v1/can/sdo/history\","
            "\"/api/v1/can/tx/periodic\","
            "\"/api/v1/bridge/enable\",\"/api/v1/bridge/disable\","
@@ -2287,6 +2346,109 @@ static void HandleCanTxPost(struct netconn *connection, const char *body)
                (unsigned long)sequence,
                period_ms != 0U ? "periodic" : "queued",
                (unsigned long)period_ms, history_saved ? "true" : "false");
+  WriterEnd(&writer);
+}
+
+static void HandleCanRawTxPost(struct netconn *connection, const char *body)
+{
+  JsonWriter writer;
+  CanTxFrame frame = {0};
+  CanTxSubmitResult result;
+  char data_text[32] = "";
+  uint32_t value;
+  uint32_t sequence;
+  uint32_t period_ms = 0U;
+  uint8_t data_length = 0U;
+
+  if (CanBridge_IsActive())
+  {
+    SendError(connection, "409 Conflict", "bridge_active",
+              "Raw transmission is disabled in bridge mode");
+    return;
+  }
+  frame.kind = CAN_TX_FRAME_RAW;
+  frame.timeout_ms = CAN_TX_DEFAULT_TIMEOUT_MS;
+  (void)JsonReadBool(body, "extended", &frame.extended);
+  (void)JsonReadBool(body, "remote", &frame.remote);
+  if (!JsonReadUnsigned(body, "can_id", &frame.id) ||
+      (frame.extended ? (frame.id > 0x1FFFFFFFU) : (frame.id > 0x7FFU)))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_can_id",
+              frame.extended ? "extended can_id must be 0..536870911" :
+                               "standard can_id must be 0..2047");
+    return;
+  }
+  if (!JsonReadUnsigned(body, "dlc", &value) || (value > 8U))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_dlc",
+              "Classic CAN dlc must be between 0 and 8");
+    return;
+  }
+  frame.dlc = (uint8_t)value;
+  if (JsonReadString(body, "data", data_text, sizeof(data_text)))
+  {
+    if (!ParseCanData(data_text, frame.data, &data_length))
+    {
+      SendError(connection, "422 Unprocessable Entity", "invalid_can_data",
+                "data must contain up to 8 complete hexadecimal byte pairs");
+      return;
+    }
+  }
+  if ((frame.remote && (data_length != 0U)) ||
+      (!frame.remote && (data_length != frame.dlc)))
+  {
+    SendError(connection, "422 Unprocessable Entity", "can_data_dlc_mismatch",
+              frame.remote ? "RTR frames must not contain data" :
+                             "data byte count must equal dlc");
+    return;
+  }
+  if (JsonReadUnsigned(body, "timeout_ms", &value))
+  {
+    if ((value < 10U) || (value > 1000U))
+    {
+      SendError(connection, "422 Unprocessable Entity", "invalid_timeout",
+                "timeout_ms must be between 10 and 1000");
+      return;
+    }
+    frame.timeout_ms = (uint16_t)value;
+  }
+  if (JsonReadUnsigned(body, "period_ms", &period_ms) &&
+      ((period_ms < CAN_TX_PERIOD_MIN_MS) ||
+       (period_ms > CAN_TX_PERIOD_MAX_MS) ||
+       (period_ms < frame.timeout_ms)))
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_period",
+              "period_ms must be 50..3600000 and not shorter than timeout_ms");
+    return;
+  }
+  result = period_ms != 0U ?
+    CanTx_StartPeriodicRaw(&frame, period_ms, &sequence) :
+    CanTx_SubmitRaw(&frame, &sequence);
+  if (result == CAN_TX_SUBMIT_MODE_DISABLED)
+  {
+    SendError(connection, "409 Conflict", "can_not_synchronized",
+              "Select or detect a valid bitrate before transmitting");
+    return;
+  }
+  if (result == CAN_TX_SUBMIT_QUEUE_FULL)
+  {
+    SendError(connection, "429 Too Many Requests", "tx_queue_full",
+              period_ms != 0U ? "Periodic transmission is already active" :
+                                "The bounded CAN transmit queue is full");
+    return;
+  }
+  if (result != CAN_TX_SUBMIT_OK)
+  {
+    SendError(connection, "422 Unprocessable Entity", "invalid_raw_frame",
+              "Raw CAN frame parameters are invalid");
+    return;
+  }
+  WriterBegin(&writer, connection, "202 Accepted");
+  WriterPrintf(&writer,
+               "{\"sequence\":%lu,\"status\":\"%s\",\"period_ms\":%lu}\n",
+               (unsigned long)sequence,
+               period_ms != 0U ? "periodic" : "queued",
+               (unsigned long)period_ms);
   WriterEnd(&writer);
 }
 
@@ -3279,6 +3441,9 @@ static bool Dispatch(struct netconn *connection, char *request)
     HandleCanTxStatus(connection);
   else if ((strcmp(method, "POST") == 0) && (strcmp(path, "/api/v1/can/tx") == 0))
     HandleCanTxPost(connection, body);
+  else if ((strcmp(method, "POST") == 0) &&
+           (strcmp(path, "/api/v1/can/tx/raw") == 0))
+    HandleCanRawTxPost(connection, body);
   else if ((strcmp(method, "GET") == 0) &&
            (strcmp(path, "/api/v1/can/tx/history") == 0))
     HandleCanTxHistory(connection);

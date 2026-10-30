@@ -20,7 +20,7 @@ type NmtCommand = 'start' | 'stop' | 'pre_operational' | 'reset_node' | 'reset_c
 interface CanModeStatus { mode: TxMode; tx_gate_enabled: boolean; active_latched: boolean; bitrate_kbps: number; sync_state: string; safety_reason: string; queue_depth: number; transmitting: boolean; bridge_active: boolean }
 interface CanTxStatus { queue_depth: number; queue_capacity: number; transmitting: boolean; queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number; last_sequence: number; last_result: string; rate_limit_fps: number; periodic_active: boolean; periodic_sequence: number; periodic_period_ms: number; periodic_attempts: number }
 interface CanTxResponse { timestamp_us: number; response_time_us: number; can_id: number; dlc: number; raw: number[] }
-interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; type?: 'nmt'; node_id: number; command: SdoCommand | NmtCommand; index?: number; subindex?: number; value?: number; can_id: number; raw: number[]; timeout_ms: number; has_response?: boolean; response?: CanTxResponse }
+interface CanTxHistoryEntry { sequence: number; timestamp_us: number; result: string; periodic: boolean; attempt_count: number; type?: 'nmt' | 'raw'; node_id?: number; command?: SdoCommand | NmtCommand; index?: number; subindex?: number; value?: number; can_id: number; extended?: boolean; remote?: boolean; dlc?: number; raw: number[]; timeout_ms: number; has_response?: boolean; response?: CanTxResponse }
 interface SdoRequestHistoryEntry { node_id: number; command: SdoCommand; index: number; subindex: number; value: number; timeout_ms: number }
 interface NmtAccepted { sequence: number; status: 'queued'; command: NmtCommand; node_id: number }
 
@@ -68,6 +68,7 @@ let txMode: CanModeStatus = { mode: 'silent', tx_gate_enabled: false, active_lat
 let txStatus: CanTxStatus = { queue_depth: 0, queue_capacity: 16, transmitting: false, queued: 0, sent: 0, cancelled: 0, timeouts: 0, arbitration_lost: 0, bus_off: 0, errors: 0, last_sequence: 0, last_result: 'mode_disabled', rate_limit_fps: 20, periodic_active: false, periodic_sequence: 0, periodic_period_ms: 0, periodic_attempts: 0 };
 let lastSubmittedSequence = 0;
 let canModeChanging = false;
+let txFormKind: 'sdo' | 'raw' = 'sdo';
 const emptyCanStatistics: Statistics['can'] = {
   received: 0, ring_overflows: 0, gui_overflows: 0, errors: 0, bus_load_permille: 0,
   error_counters: { interrupts: 0, warning: 0, passive: 0, bus_off: 0, stuff: 0, form: 0, ack: 0, bit_recessive: 0, bit_dominant: 0, crc: 0, unclassified: 0 },
@@ -374,7 +375,7 @@ function renderTxControls(): void {
   text('tx-mode-badge', bridge ? 'BRIDGE' : periodic ? 'ТАЙМЕР' : '');
   $('tx-tab-button').classList.toggle('tx-active', bridge || periodic);
   text('tx-mode-detail', bridge
-    ? 'Локальные и обычные веб-запросы SDO отключены. Мониторинг шины, статистика и журналирование доступны.'
+    ? 'Локальная, SDO- и raw-передача из веб-интерфейса отключены. Мониторинг шины, статистика и журналирование доступны.'
     : periodic
     ? `${txMode.bitrate_kbps} кбит/с · выполнено ${formatInt(txStatus.periodic_attempts)} · передача остаётся включённой до остановки таймера`
     : `${txMode.bitrate_kbps ? `${txMode.bitrate_kbps} кбит/с · ${txMode.sync_state}` : 'Скорость шины ещё не определена'} · после разового запроса передача выключается автоматически`);
@@ -435,24 +436,32 @@ async function refreshTxHistory(showError = false): Promise<void> {
     target.className = 'tx-history';
     target.innerHTML = result.items.map(entry => {
       const isNmt = entry.type === 'nmt';
-      const command = isNmt ? `NMT ${nmtCommandName(entry.command as NmtCommand)}` : sdoCommandName(entry.command as SdoCommand);
-      const bytes = isNmt ? 0 : sdoValueBytes(entry.command as SdoCommand);
+      const isRaw = entry.type === 'raw';
+      const command = isNmt
+        ? `NMT ${nmtCommandName(entry.command as NmtCommand)}`
+        : isRaw
+        ? `RAW ${entry.extended ? 'EXT' : 'STD'} ${entry.remote ? 'RTR' : 'DATA'}`
+        : sdoCommandName(entry.command as SdoCommand);
+      const bytes = isNmt || isRaw ? 0 : sdoValueBytes(entry.command as SdoCommand);
       const value = bytes && entry.value !== undefined ? `0x${hex(entry.value, bytes * 2)}` : entry.raw.map(byte => hex(byte, 2)).join(' ');
       const attempts = entry.periodic ? `<small>× ${formatInt(entry.attempt_count)}</small>` : '';
-      const index = isNmt || entry.index === undefined ? '—' : `0x${hex(entry.index, 4)}`;
-      const subindex = isNmt || entry.subindex === undefined ? '—' : `0x${hex(entry.subindex, 2)}`;
-      const request = `<div class="tx-history-row tx-history-grid${entry.periodic ? ' periodic' : ''}${isNmt ? '' : ' paired'}"><span>${entry.periodic ? '↻ ' : ''}#${entry.sequence}</span><span>${formatTime(entry.timestamp_us)}</span><span>${entry.node_id || 'ALL'}</span><span>${escapeHtml(command)}${isNmt ? '' : '<small>REQ</small>'}</span><span>${index}</span><span>${subindex}</span><span>${value}${attempts}</span><span class="tx-result-${escapeHtml(entry.result)}">${escapeHtml(txResultName(entry.result))}</span></div>`;
-      if (isNmt) return request;
+      const index = isNmt || isRaw || entry.index === undefined ? '—' : `0x${hex(entry.index, 4)}`;
+      const subindex = isNmt || isRaw || entry.subindex === undefined ? '—' : `0x${hex(entry.subindex, 2)}`;
+      const node = isRaw ? `0x${hex(entry.can_id, entry.extended ? 8 : 3)}` : entry.node_id || 'ALL';
+      const detail = isRaw ? `<small>DLC ${entry.dlc ?? entry.raw.length}</small>` : isNmt ? '' : '<small>REQ</small>';
+      const displayValue = isRaw && entry.remote ? 'RTR' : value || '—';
+      const request = `<div class="tx-history-row tx-history-grid${entry.periodic ? ' periodic' : ''}${isNmt || isRaw ? '' : ' paired'}"><span>${entry.periodic ? '↻ ' : ''}#${entry.sequence}</span><span>${formatTime(entry.timestamp_us)}</span><span>${node}</span><span>${escapeHtml(command)}${detail}</span><span>${index}</span><span>${subindex}</span><span>${displayValue}${attempts}</span><span class="tx-result-${escapeHtml(entry.result)}">${escapeHtml(txResultName(entry.result))}</span></div>`;
+      if (isNmt || isRaw) return request;
       if (!entry.has_response || !entry.response) {
         const missing = entry.result === 'sent' ? 'Нет ответа' : 'Запрос не отправлен';
-        return `${request}<div class="tx-history-row tx-history-grid response missing"><span>#${entry.sequence}</span><span>—</span><span>${entry.node_id}</span><span>RESP</span><span>${index}</span><span>${subindex}</span><span>—</span><span>${missing}</span></div>`;
+        return `${request}<div class="tx-history-row tx-history-grid response missing"><span>#${entry.sequence}</span><span>—</span><span>${entry.node_id ?? '—'}</span><span>RESP</span><span>${index}</span><span>${subindex}</span><span>—</span><span>${missing}</span></div>`;
       }
       const response = entry.response;
       const raw = response.raw.map(byte => hex(byte, 2)).join(' ');
       const abort = response.raw[0] === 0x80 && response.raw.length >= 8 ? littleEndianValue(response.raw.slice(4, 8)) : 0;
       const responseResult = abort ? `${sdoAbortName(abort)} · 0x${hex(abort, 8)}` : 'Ответ получен';
       const responseClass = abort ? ' abort' : '';
-      return `${request}<div class="tx-history-row tx-history-grid response${responseClass}"><span>#${entry.sequence}</span><span>${formatTime(response.timestamp_us)}<small>+${formatInt(response.response_time_us)} мкс</small></span><span>${entry.node_id}</span><span>RESP</span><span>${index}</span><span>${subindex}</span><span>${raw}</span><span>${escapeHtml(responseResult)}</span></div>`;
+      return `${request}<div class="tx-history-row tx-history-grid response${responseClass}"><span>#${entry.sequence}</span><span>${formatTime(response.timestamp_us)}<small>+${formatInt(response.response_time_us)} мкс</small></span><span>${entry.node_id ?? '—'}</span><span>RESP</span><span>${index}</span><span>${subindex}</span><span>${raw}</span><span>${escapeHtml(responseResult)}</span></div>`;
     }).join('');
   } catch (error) {
     if (showError) notify(error instanceof Error ? error.message : 'Журнал TX недоступен', true);
@@ -508,7 +517,34 @@ function updateSdoForm(): void {
   value.placeholder = bytes ? `${bytes * 2} hex-символов максимум` : 'Для чтения значение не передаётся';
 }
 
-async function submitTxFrame(periodic = false): Promise<void> {
+function updateRawForm(): void {
+  const extended = $<HTMLSelectElement>('raw-format').value === 'extended';
+  const remote = $<HTMLSelectElement>('raw-frame-type').value === 'remote';
+  const id = $<HTMLInputElement>('raw-can-id');
+  const data = $<HTMLInputElement>('raw-data');
+  id.maxLength = extended ? 8 : 3;
+  id.placeholder = extended ? '00000000…1FFFFFFF' : '000…7FF';
+  data.disabled = remote;
+  data.placeholder = remote ? 'RTR не содержит данных' : '11 22 33 44';
+}
+
+function setTxFormKind(kind: 'sdo' | 'raw'): void {
+  txFormKind = kind;
+  const sdo = kind === 'sdo';
+  $('tx-sdo-pane').toggleAttribute('hidden', !sdo);
+  $('tx-raw-pane').toggleAttribute('hidden', sdo);
+  $('sdo-recent-panel').toggleAttribute('hidden', !sdo);
+  $('tx-kind-sdo').classList.toggle('active', sdo);
+  $('tx-kind-raw').classList.toggle('active', !sdo);
+  $('tx-kind-sdo').setAttribute('aria-selected', String(sdo));
+  $('tx-kind-raw').setAttribute('aria-selected', String(!sdo));
+  text('tx-client-eyebrow', sdo ? 'CANopen SDO client' : 'Classic CAN frame');
+  text('tx-state-eyebrow', sdo ? 'SDO client' : 'Raw CAN');
+  text('tx-send', sdo ? 'Отправить один раз' : 'Отправить raw-кадр');
+  updateRawForm();
+}
+
+async function submitSdoFrame(periodic = false): Promise<void> {
   const nodeId = Number($<HTMLInputElement>('tx-node').value);
   const command = $<HTMLSelectElement>('tx-command').value as SdoCommand;
   const indexText = $<HTMLInputElement>('tx-index').value.trim();
@@ -542,6 +578,52 @@ async function submitTxFrame(periodic = false): Promise<void> {
   } catch (error) {
     notify(error instanceof Error ? error.message : 'Кадр не поставлен в очередь', true);
   }
+}
+
+async function submitRawFrame(periodic = false): Promise<void> {
+  const extended = $<HTMLSelectElement>('raw-format').value === 'extended';
+  const remote = $<HTMLSelectElement>('raw-frame-type').value === 'remote';
+  const idText = $<HTMLInputElement>('raw-can-id').value.trim();
+  const dlc = Number($<HTMLInputElement>('raw-dlc').value);
+  const dataText = $<HTMLInputElement>('raw-data').value.trim();
+  const timeout = Number($<HTMLInputElement>('raw-timeout').value);
+  const period = Number($<HTMLInputElement>('raw-period').value);
+  const maxId = extended ? 0x1FFFFFFF : 0x7FF;
+  if (!/^[0-9a-f]{1,8}$/i.test(idText) || Number.parseInt(idText, 16) > maxId) {
+    notify(`CAN ID должен быть hex-числом 0…${extended ? '1FFFFFFF' : '7FF'} без 0x`, true);
+    return;
+  }
+  if (!Number.isInteger(dlc) || dlc < 0 || dlc > 8) { notify('DLC должен быть от 0 до 8', true); return; }
+  if (!Number.isInteger(timeout) || timeout < 10 || timeout > 1000) { notify('Timeout должен быть от 10 до 1000 мс', true); return; }
+  if (periodic && (!Number.isInteger(period) || period < 50 || period > 3600000 || period < timeout)) { notify('Период должен быть от 50 до 3 600 000 мс и не короче Timeout', true); return; }
+  const compactData = dataText.replace(/[\s:-]/g, '');
+  if (!remote && (!/^[0-9a-f]*$/i.test(compactData) || compactData.length % 2 !== 0 || compactData.length / 2 !== dlc)) {
+    notify(`Для DLC ${dlc} укажите ровно ${dlc} hex-байт`, true);
+    return;
+  }
+  const body = {
+    can_id: Number.parseInt(idText, 16),
+    extended,
+    remote,
+    dlc,
+    data: remote ? '' : compactData.toUpperCase(),
+    timeout_ms: timeout,
+    ...(periodic ? { period_ms: period } : {})
+  };
+  try {
+    const result = await api<{ sequence: number; status: string; period_ms: number }>('/api/v1/can/tx/raw', { method: 'POST', body: JSON.stringify(body) });
+    if (!periodic) lastSubmittedSequence = result.sequence;
+    notify(periodic ? `Периодический raw-кадр #${result.sequence} запущен` : `Raw-кадр #${result.sequence} поставлен в очередь`);
+    await refreshTx();
+    window.setTimeout(() => void refreshTxHistory(), 250);
+  } catch (error) {
+    notify(error instanceof Error ? error.message : 'Raw-кадр не поставлен в очередь', true);
+  }
+}
+
+async function submitTxFrame(periodic = false): Promise<void> {
+  if (txFormKind === 'raw') await submitRawFrame(periodic);
+  else await submitSdoFrame(periodic);
 }
 
 async function stopPeriodicTx(): Promise<void> {
@@ -973,8 +1055,13 @@ function bindUi(): void {
   $('start-recording').onclick = () => void loggerCommand('start');
   $('stop-recording').onclick = () => void loggerCommand('stop');
   $<HTMLFormElement>('tx-form').onsubmit = event => { event.preventDefault(); void submitTxFrame(); };
+  $('tx-kind-sdo').onclick = () => setTxFormKind('sdo');
+  $('tx-kind-raw').onclick = () => setTxFormKind('raw');
   $('tx-command').onchange = updateSdoForm;
+  $('raw-format').onchange = updateRawForm;
+  $('raw-frame-type').onchange = updateRawForm;
   updateSdoForm();
+  setTxFormKind('sdo');
   $('tx-periodic-start').onclick = () => void submitTxFrame(true);
   $('tx-periodic-stop').onclick = () => void stopPeriodicTx();
   $('tx-cancel-last').onclick = () => void cancelLastTx();

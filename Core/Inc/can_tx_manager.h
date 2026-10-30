@@ -16,6 +16,12 @@
 
 typedef struct
 {
+  enum
+  {
+    CAN_TX_FRAME_RAW = 0,
+    CAN_TX_FRAME_SDO,
+    CAN_TX_FRAME_NMT
+  } kind;
   uint32_t id;
   uint16_t timeout_ms;
   uint8_t dlc;
@@ -113,6 +119,8 @@ bool CanTx_DecodeNmt(const CanTxFrame *frame, CanTxNmtCommand *command,
                      uint8_t *node_id);
 CanTxSubmitResult CanTx_SubmitNmt(CanTxNmtCommand command, uint8_t node_id,
                                  uint32_t *sequence);
+CanTxSubmitResult CanTx_SubmitRaw(const CanTxFrame *frame,
+                                 uint32_t *sequence);
 CanTxSubmitResult CanTx_SubmitSdo(const CanTxSdoRequest *request,
                                  uint32_t *sequence);
 CanTxSubmitResult CanTx_SubmitBridgeSdo(const CanTxSdoRequest *request,
@@ -122,6 +130,9 @@ CanTxSubmitResult CanTx_SubmitScannerSdo(const CanTxSdoRequest *request,
                                         uint32_t *sequence);
 bool CanTx_SetScannerExclusive(bool enabled);
 CanTxSubmitResult CanTx_StartPeriodicSdo(const CanTxSdoRequest *request,
+                                         uint32_t period_ms,
+                                         uint32_t *sequence);
+CanTxSubmitResult CanTx_StartPeriodicRaw(const CanTxFrame *frame,
                                          uint32_t period_ms,
                                          uint32_t *sequence);
 bool CanTx_StopPeriodic(void);
