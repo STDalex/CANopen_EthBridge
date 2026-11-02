@@ -46,3 +46,23 @@ python app.py "G:\CANSNIFF"
 Для больших записей в таблице показываются первые 50 000 отфильтрованных
 строк, но CSV-экспорт содержит всю выборку.
 
+## Исходники и проверка
+
+- `analysis.py` — чтение `.CSL`, проверка CRC, CANopen-декодеры и фильтры;
+- `app.py` — графический интерфейс Tkinter;
+- `CanSniff_Log_Analyzer.pyw` и `run_log_analyzer.bat` — сценарии запуска;
+- `test_log_analyzer.py` — модульные тесты на синтетическом логе.
+
+Тесты запускаются из корня репозитория:
+
+```powershell
+python -m unittest discover -s log_analyzer -p "test_*.py"
+```
+
+Для сборки автономного Windows EXE установите PyInstaller и выполните:
+
+```powershell
+pyinstaller --noconfirm --clean --onefile --windowed `
+  --name CanSniff_Log_Analyzer log_analyzer/CanSniff_Log_Analyzer.pyw
+```
+
