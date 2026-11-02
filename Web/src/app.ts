@@ -5,7 +5,7 @@ interface Frame { timestamp: number; id: number; extended: boolean; remote: bool
 interface DeviceState { firmware: string; uptime_ms: number; network: { initialized: boolean; link_up: boolean; source: string; ip: string }; can: { state: string; bitrate_kbps: number; received: number; operating_mode: TxMode; tx_gate_enabled: boolean; safety_reason: string }; storage: { state: string; mode: string; file: string } }
 interface CanErrorCounters { interrupts: number; warning: number; passive: number; bus_off: number; stuff: number; form: number; ack: number; bit_recessive: number; bit_dominant: number; crc: number; unclassified: number }
 interface CanLastError { type: string; timestamp_us: number; esr: number; tx_error_counter: number; rx_error_counter: number }
-interface Statistics { can: { received: number; ring_overflows: number; gui_overflows: number; errors: number; bus_load_permille: number; error_counters: CanErrorCounters; last_error: CanLastError }; analyzer: { frames: number; unique_nodes: number; queue_overflows: number }; logger: { stored_frames: number; dropped_frames: number; write_errors: number; recoveries: number }; tx: { queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number }; websocket: { active: boolean; connections: number; batches: number; frames: number; lost_frames: number } }
+interface Statistics { can: { received: number; ring_overflows: number; gui_overflows: number; errors: number; bus_load_permille: number; error_counters: CanErrorCounters; last_error: CanLastError }; analyzer: { frames: number; unique_nodes: number; queue_overflows: number }; logger: { stored_frames: number; dropped_frames: number; write_errors: number; recoveries: number }; tx: { queued: number; sent: number; cancelled: number; timeouts: number; arbitration_lost: number; bus_off: number; errors: number }; websocket: { active: boolean; clients: number; limit: number; connections: number; batches: number; frames: number; lost_frames: number } }
 interface NodeInfo { node_id: number; last_type: string; first_seen_us: number; last_seen_us: number; frames: number; bytes: number; sdo_requests: number; sdo_responses: number; sdo_started: number; sdo_completed: number; sdo_aborted: number; sdo_timeouts: number; sdo_conflicts: number; sdo_orphans: number; sdo_protocol_errors: number; sdo_errors: number; has_nmt_state?: boolean; nmt_state?: string; nmt_state_code?: number }
 interface NodeEvent { timestamp_us: number; id: number; type: string; sdo_status: string; index: number; subindex: number; response_time_us: number; transaction_time_us: number; transferred_bytes: number; abort_code: number; extended: boolean; remote: boolean; local_tx: boolean; local_transaction: boolean; dlc: number; has_response_time: boolean; has_sdo_address: boolean; data_offset: number; data: string }
 interface LoggerConfig { mode: 'full' | 'selected'; selected_nodes: number[]; recording: boolean; active_mode: 'off' | 'full' | 'selected'; card_state?: string; file?: string; file_size_bytes?: number; free_bytes?: number; stored_frames?: number; dropped_frames?: number; write_errors?: number; recoveries?: number; last_error?: number; selected_node_count?: number }
@@ -58,6 +58,7 @@ let reconnects = 0;
 let ws: WebSocket | undefined;
 let reconnectTimer = 0;
 let retryMs = 500;
+let listenerLimitShown = false;
 let flushTimer = 0;
 let toastTimer = 0;
 let lastRateFrames = 0;
@@ -188,6 +189,32 @@ function setConnection(state: ConnState, label: string): void {
   text('conn-label', label);
 }
 
+function showListenerLimitPage(clients: number, limit: number): void {
+  listenerLimitShown = true;
+  clearTimeout(reconnectTimer);
+  text('listener-limit-count', `${formatInt(clients)} / ${formatInt(limit)}`);
+  document.title = '503 · CanSniff занят';
+  document.body.classList.add('listener-limit');
+  $('listener-limit-page').hidden = false;
+}
+
+async function handleStreamClose(opened: boolean): Promise<void> {
+  if (listenerLimitShown) return;
+  if (!opened) {
+    try {
+      const stats = await api<Statistics>('/api/v1/statistics');
+      if (stats.websocket.limit > 0 && stats.websocket.clients >= stats.websocket.limit) {
+        showListenerLimitPage(stats.websocket.clients, stats.websocket.limit);
+        return;
+      }
+    } catch { /* fall through to the ordinary reconnect loop */ }
+  }
+  reconnects++;
+  setConnection('offline', `Нет связи · попытка ${reconnects}`);
+  reconnectTimer = window.setTimeout(connectStream, retryMs);
+  retryMs = Math.min(retryMs * 2, 10_000);
+}
+
 function decodeFrame(frame: Omit<Frame,'type'|'node'|'sdo'>): Frame {
   let type: CanType = 'Unknown';
   let node: number | undefined;
@@ -257,9 +284,10 @@ function connectStream(): void {
   clearTimeout(reconnectTimer);
   setConnection('connecting', reconnects ? 'Переподключение…' : 'Подключение…');
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let opened = false;
   ws = new WebSocket(`${protocol}//${location.host}/api/v1/stream`);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => { setConnection('online','Live'); retryMs = 500; };
+  ws.onopen = () => { opened = true; setConnection('online','Live'); retryMs = 500; };
   ws.onmessage = event => {
     if (typeof event.data === 'string') {
       try {
@@ -276,12 +304,7 @@ function connectStream(): void {
       if (!paused) pendingFrames.push(...batch);
     } catch (error) { notify(error instanceof Error ? error.message : 'Ошибка live stream', true); ws?.close(); }
   };
-  ws.onclose = () => {
-    reconnects++;
-    setConnection('offline', `Нет связи · попытка ${reconnects}`);
-    reconnectTimer = window.setTimeout(connectStream, retryMs);
-    retryMs = Math.min(retryMs * 2, 10_000);
-  };
+  ws.onclose = () => { void handleStreamClose(opened); };
   ws.onerror = () => ws?.close();
 }
 
@@ -667,6 +690,7 @@ async function refreshStatus(): Promise<void> {
     text('can-loss', formatInt(stats.can.ring_overflows));
     text('analyzer-loss', formatInt(stats.analyzer.queue_overflows));
     text('can-errors', formatInt(stats.can.errors));
+    text('live-listeners', `${formatInt(stats.websocket.clients)} / ${formatInt(stats.websocket.limit)}`);
     renderErrorStatistics(stats.can);
     text('log-mode', modeName(state.storage.mode));
     text('log-file', state.storage.file || state.storage.state);
@@ -1067,6 +1091,7 @@ function bindUi(): void {
   $('tx-cancel-last').onclick = () => void cancelLastTx();
   $('refresh-tx-history').onclick = () => void refreshTxHistory(true);
   $('refresh-sdo-history').onclick = () => void refreshSdoRequestHistory(true);
+  $('listener-limit-retry').onclick = () => location.reload();
 }
 
 bindUi();

@@ -238,6 +238,19 @@ h2 { font-size: 17px; margin: 2px 0 0; }
 #toast.show { opacity: 1; transform: none; }
 #toast.error { border-color: #913e48; background: #3a2027; }
 
+.listener-limit-page { min-height: 100vh; padding: 32px 18px; display: grid; place-items: center; background: radial-gradient(circle at 50% 0, #27394b 0, transparent 42%), var(--bg); }
+.listener-limit-card { width: min(620px, 100%); padding: clamp(26px, 6vw, 54px); border: 1px solid #6f3d47; border-radius: 22px; background: linear-gradient(145deg, #1c2029, #111820); box-shadow: 0 28px 80px #0008; text-align: center; }
+.listener-limit-brand { display: flex; align-items: center; justify-content: center; gap: 11px; margin-bottom: 30px; color: var(--muted); font-size: 13px; }
+.listener-limit-code { color: var(--red); font-size: clamp(74px, 18vw, 132px); font-weight: 850; line-height: .88; letter-spacing: -.07em; text-shadow: 0 0 45px #ff6b6b24; }
+.listener-limit-card h1 { max-width: 500px; margin: 10px auto 14px; font-size: clamp(24px, 5vw, 38px); line-height: 1.12; }
+.listener-limit-card > p { margin: 0 auto; color: #b9c8d4; line-height: 1.6; }
+.listener-limit-status { width: min(300px, 100%); margin: 24px auto; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 1px solid #59434a; border-radius: 12px; background: #241a20; }
+.listener-limit-status span { color: var(--muted); font-size: 11px; letter-spacing: .08em; }
+.listener-limit-status strong { color: var(--red); font-size: 22px; }
+.listener-limit-card .listener-limit-joke { margin-bottom: 24px; color: var(--amber); font-size: 13px; }
+.listener-limit-card button { min-width: min(300px, 100%); }
+body.listener-limit .topbar, body.listener-limit > main, body.listener-limit #toast { display: none; }
+
 @media (max-width: 1000px) {
   .metrics { grid-template-columns: repeat(2, 1fr); }
   .settings-grid { grid-template-columns: 1fr; }

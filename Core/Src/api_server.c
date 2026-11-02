@@ -30,6 +30,7 @@
 #define API_DEFAULT_PAGE_SIZE        32U
 #define API_MAX_PAGE_SIZE            64U
 #define WEBSOCKET_RING_CAPACITY      8192U
+#define WEBSOCKET_CLIENT_LIMIT       WEBSOCKET_TASK_STACK_COUNT
 #define WEBSOCKET_BATCH_MAX_FRAMES   60U
 #define WEBSOCKET_BATCH_HEADER_BYTES 16U
 #define WEBSOCKET_FRAME_BYTES        24U
@@ -42,6 +43,7 @@
 #define WEBSOCKET_AGGREGATION_MS      5U
 #define WEBSOCKET_AGGREGATION_POLL_MS 1U
 #define WEBSOCKET_CONTROL_POLL_MS     20U
+#define WEBSOCKET_SEND_TIMEOUT_MS     500U
 #define WEBSOCKET_DRAIN_BACKLOG       (2U * WEBSOCKET_BATCH_MAX_FRAMES)
 #define WEBSOCKET_CRITICAL_BACKLOG    ((3U * WEBSOCKET_RING_CAPACITY) / 4U)
 #define WEBSOCKET_BASE_PRIORITY       (tskIDLE_PRIORITY + 1U)
@@ -63,6 +65,16 @@ _Static_assert((WEBSOCKET_RING_CAPACITY & (WEBSOCKET_RING_CAPACITY - 1U)) == 0U,
 _Static_assert((WEBSOCKET_RING_CAPACITY * sizeof(CanFrameRecord)) <=
                WEBSOCKET_RING_REGION_BYTES,
                "WebSocket ring exceeds its external SDRAM region");
+_Static_assert(WEBSOCKET_CLIENT_LIMIT == 4U,
+               "The public live-stream listener limit must remain four");
+_Static_assert(MEMP_NUM_TCP_PCB >= (WEBSOCKET_CLIENT_LIMIT + 3U),
+               "lwIP needs PCBs for four streams, Bridge, listener and API");
+_Static_assert(MEMP_NUM_NETCONN >= (WEBSOCKET_CLIENT_LIMIT + 3U),
+               "lwIP needs netconns for four streams, Bridge, listener and API");
+_Static_assert((WEBSOCKET_TASK_STACK_BASE +
+                (WEBSOCKET_CLIENT_LIMIT * WEBSOCKET_TASK_STACK_WORDS *
+                 sizeof(StackType_t))) <= WEBSOCKET_RING_BASE,
+               "WebSocket client stacks overlap the shared frame ring");
 _Static_assert(WEBSOCKET_TX_MAX_BYTES <= 1460U,
                "WebSocket batch must fit one TCP MSS");
 
@@ -100,6 +112,14 @@ typedef struct
   struct netconn *connection;
 } TcpNoDelayCall;
 
+typedef struct
+{
+  StaticTask_t task_control;
+  TaskHandle_t task_handle;
+  struct netconn *volatile pending_connection;
+  bool reserved;
+} WebSocketClientSlot;
+
 static CanFrameRecord *const frame_history =
   (CanFrameRecord *)API_SNAPSHOT_BASE;
 static uint32_t frame_history_write;
@@ -124,12 +144,7 @@ static CanFrameRecord *const websocket_ring =
 static char *const http_request_buffer =
   (char *)API_HTTP_REQUEST_BUFFER_BASE;
 static volatile uint32_t websocket_write_sequence;
-static StaticTask_t websocket_task_control;
-static StackType_t *const websocket_task_stack =
-  (StackType_t *)WEBSOCKET_TASK_STACK_BASE;
-static TaskHandle_t websocket_task_handle;
-static struct netconn *volatile websocket_pending_connection;
-static volatile bool websocket_reserved;
+static WebSocketClientSlot websocket_clients[WEBSOCKET_CLIENT_LIMIT];
 static StaticTask_t bridge_task_control;
 static StackType_t *const bridge_task_stack =
   (StackType_t *)BRIDGE_TASK_STACK_BASE;
@@ -919,7 +934,7 @@ static void WebSocketLiveRun(struct netconn *connection)
   }
 
   netconn_set_recvtimeout(connection, 1);
-  netconn_set_sendtimeout(connection, 1000);
+  netconn_set_sendtimeout(connection, WEBSOCKET_SEND_TIMEOUT_MS);
   last_control_tick = HAL_GetTick();
   for (;;)
   {
@@ -1020,16 +1035,52 @@ static void WebSocketLiveRun(struct netconn *connection)
   }
 }
 
+static WebSocketClientSlot *WebSocketReserveClient(void)
+{
+  WebSocketClientSlot *slot = NULL;
+  uint32_t index;
+  taskENTER_CRITICAL();
+  for (index = 0U; index < WEBSOCKET_CLIENT_LIMIT; ++index)
+  {
+    WebSocketClientSlot *candidate = &websocket_clients[index];
+    if (!candidate->reserved && (candidate->task_handle != NULL))
+    {
+      candidate->reserved = true;
+      ++public_status.websocket_clients;
+      public_status.websocket_active = true;
+      slot = candidate;
+      break;
+    }
+  }
+  taskEXIT_CRITICAL();
+  return slot;
+}
+
+static void WebSocketReleaseClient(WebSocketClientSlot *slot)
+{
+  if (slot == NULL) return;
+  taskENTER_CRITICAL();
+  slot->pending_connection = NULL;
+  if (slot->reserved)
+  {
+    slot->reserved = false;
+    if (public_status.websocket_clients != 0U)
+      --public_status.websocket_clients;
+  }
+  public_status.websocket_active = public_status.websocket_clients != 0U;
+  taskEXIT_CRITICAL();
+}
+
 static void WebSocketTask(void *argument)
 {
-  (void)argument;
+  WebSocketClientSlot *slot = (WebSocketClientSlot *)argument;
   for (;;)
   {
     struct netconn *connection;
     (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     taskENTER_CRITICAL();
-    connection = websocket_pending_connection;
-    websocket_pending_connection = NULL;
+    connection = slot->pending_connection;
+    slot->pending_connection = NULL;
     taskEXIT_CRITICAL();
     if (connection != NULL)
     {
@@ -1037,10 +1088,7 @@ static void WebSocketTask(void *argument)
       (void)netconn_close(connection);
       netconn_delete(connection);
     }
-    taskENTER_CRITICAL();
-    websocket_reserved = false;
-    public_status.websocket_active = false;
-    taskEXIT_CRITICAL();
+    WebSocketReleaseClient(slot);
   }
 }
 
@@ -1104,36 +1152,24 @@ static bool WebSocketAccept(struct netconn *connection, const char *request)
 static bool HandleWebSocketUpgrade(struct netconn *connection,
                                    const char *request)
 {
-  bool available;
-
-  taskENTER_CRITICAL();
-  available = !websocket_reserved;
-  if (available)
-  {
-    websocket_reserved = true;
-    public_status.websocket_active = true;
-  }
-  taskEXIT_CRITICAL();
-  if (!available)
+  WebSocketClientSlot *slot = WebSocketReserveClient();
+  if (slot == NULL)
   {
     SendError(connection, "503 Service Unavailable", "websocket_busy",
-              "The live stream already has a client");
+              "The live stream listener limit of four has been reached");
     return false;
   }
   if (!WebSocketAccept(connection, request))
   {
-    taskENTER_CRITICAL();
-    websocket_reserved = false;
-    public_status.websocket_active = false;
-    taskEXIT_CRITICAL();
+    WebSocketReleaseClient(slot);
     return false;
   }
 
   taskENTER_CRITICAL();
-  websocket_pending_connection = connection;
+  slot->pending_connection = connection;
   ++public_status.websocket_connections;
   taskEXIT_CRITICAL();
-  xTaskNotifyGive(websocket_task_handle);
+  xTaskNotifyGive(slot->task_handle);
   return true;
 }
 
@@ -2782,7 +2818,8 @@ static void HandleStatistics(struct netconn *connection)
     "\"tx\":{\"queued\":%lu,\"sent\":%lu,\"cancelled\":%lu,"
     "\"timeouts\":%lu,\"arbitration_lost\":%lu,\"bus_off\":%lu,"
     "\"errors\":%lu},"
-    "\"websocket\":{\"active\":%s,\"connections\":%lu,\"batches\":%lu,"
+    "\"websocket\":{\"active\":%s,\"clients\":%lu,\"limit\":%u,"
+    "\"connections\":%lu,\"batches\":%lu,"
     "\"frames\":%lu,\"lost_frames\":%lu},"
     "\"downloads\":{\"requests\":%lu,\"completed\":%lu,\"bytes\":%llu}}\n",
     (unsigned long)analyzer.frame_count,
@@ -2799,6 +2836,8 @@ static void HandleStatistics(struct netconn *connection)
     (unsigned long)tx.arbitration_lost, (unsigned long)tx.bus_off,
     (unsigned long)tx.errors,
     api.websocket_active ? "true" : "false",
+    (unsigned long)api.websocket_clients,
+    (unsigned int)WEBSOCKET_CLIENT_LIMIT,
     (unsigned long)api.websocket_connections,
     (unsigned long)api.websocket_batches,
     (unsigned long)api.websocket_frames,
@@ -3521,19 +3560,28 @@ static bool Dispatch(struct netconn *connection, char *request)
 
 void ApiServer_Run(void)
 {
+  static const char *const websocket_task_names[WEBSOCKET_CLIENT_LIMIT] =
+    {"wsLive0", "wsLive1", "wsLive2", "wsLive3"};
+  uint32_t client_index;
   memset(&public_status, 0, sizeof(public_status));
   websocket_write_sequence = 0U;
-  websocket_pending_connection = NULL;
-  websocket_reserved = false;
+  memset(websocket_clients, 0, sizeof(websocket_clients));
   bridge_pending_connection = NULL;
   bridge_websocket_reserved = false;
   bridge_pending_session_id = 0U;
   bridge_stream_sequence = 0U;
-  websocket_task_handle = xTaskCreateStatic(WebSocketTask, "wsLiveTask",
-                                             WEBSOCKET_TASK_STACK_WORDS, NULL,
-                                             WEBSOCKET_BASE_PRIORITY,
-                                             websocket_task_stack,
-                                             &websocket_task_control);
+  for (client_index = 0U; client_index < WEBSOCKET_CLIENT_LIMIT;
+       ++client_index)
+  {
+    WebSocketClientSlot *slot = &websocket_clients[client_index];
+    StackType_t *stack = (StackType_t *)(WEBSOCKET_TASK_STACK_BASE +
+      (client_index * WEBSOCKET_TASK_STACK_WORDS * sizeof(StackType_t)));
+    slot->task_handle = xTaskCreateStatic(WebSocketTask,
+                                           websocket_task_names[client_index],
+                                           WEBSOCKET_TASK_STACK_WORDS, slot,
+                                           WEBSOCKET_BASE_PRIORITY, stack,
+                                           &slot->task_control);
+  }
   bridge_task_handle = xTaskCreateStatic(BridgeWebSocketTask, "wsBridgeTask",
                                           BRIDGE_TASK_STACK_WORDS, NULL,
                                           tskIDLE_PRIORITY + 1U,

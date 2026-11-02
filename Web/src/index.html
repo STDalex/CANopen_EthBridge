@@ -18,7 +18,7 @@
       <article><span>Скорость CAN</span><strong id="can-rate">—</strong><small id="can-state">ожидание</small></article>
       <article><span>Загрузка шины</span><strong id="bus-load">—</strong><small class="metric-details"><span id="traffic-total">0 кадров</span><span>CAN LOSS <b id="can-loss">0</b></span><span>ANALYZER LOSS <b id="analyzer-loss">0</b></span><span>ERR <b id="can-errors">0</b></span></small></article>
       <article><span>Запись</span><strong id="log-mode">—</strong><small><span id="log-file">нет файла</span> · свободно <span id="log-free">—</span></small></article>
-      <article><span>Live stream</span><strong id="live-rate">0 кадр/с</strong><small class="metric-details"><span>WEB MISSED <b id="gap-count">0</b></span><span>WEB GAPS <b id="gap-blocks">0</b></span></small></article>
+      <article><span>Live stream</span><strong id="live-rate">0 кадр/с</strong><small class="metric-details"><span>LISTENERS <b id="live-listeners">0 / 4</b></span><span>WEB MISSED <b id="gap-count">0</b></span><span>WEB GAPS <b id="gap-blocks">0</b></span></small></article>
     </section>
 
     <nav class="tabs" aria-label="Разделы">
@@ -232,6 +232,7 @@
           <p><strong>Пауза</strong> останавливает только перерисовку таблицы — приём CAN продолжается. «Очистить» удаляет браузерный буфер, но не сбрасывает аппаратную статистику.</p>
           <h3>Потери, пропуски и разрывы</h3>
           <dl class="help-definitions">
+            <div><dt>LISTENERS</dt><dd>Число активных клиентов live WebSocket-потока. Допускается до четырёх независимых слушателей; управляющий Bridge в этот счётчик не входит.</dd></div>
             <div><dt>CAN LOSS</dt><dd>Кадры, потерянные до обработки всей системой: переполнилось входное программное кольцо или аппаратный FIFO CAN. Такой кадр не увидят анализатор, логгер, экран и WebSocket.</dd></div>
             <div><dt>ANALYZER LOSS</dt><dd>Кадр принят, но не попал в CANopen-анализатор из-за заполненной очереди. Raw-кадр при этом мог быть записан или передан в браузер.</dd></div>
             <div><dt>WEB MISSED</dt><dd>Число отдельных кадров, отсутствующих в последовательности WebSocket браузера. Они могли остаться в анализаторе или на microSD.</dd></div>
@@ -333,6 +334,18 @@
       </div>
     </section>
   </main>
+  <section id="listener-limit-page" class="listener-limit-page" role="alert" aria-labelledby="listener-limit-title" hidden>
+    <div class="listener-limit-card">
+      <div class="listener-limit-brand"><span class="brand-mark">CS</span><span>CanSniff · Live stream</span></div>
+      <div class="listener-limit-code">503</div>
+      <span class="eyebrow">Service Unavailable</span>
+      <h1 id="listener-limit-title">Все места у CAN-шины уже заняты</h1>
+      <p>Четыре live-клиента уже получают CAN-поток. Закройте одну из других вкладок или приложений, затем повторите подключение.</p>
+      <div class="listener-limit-status"><span>LIVE LISTENERS</span><strong id="listener-limit-count">4 / 4</strong></div>
+      <p class="listener-limit-joke">CAN-шина не резиновая. Мы проверяли — осциллограф подтвердил.</p>
+      <button id="listener-limit-retry" type="button">Проверить места ещё раз</button>
+    </div>
+  </section>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="__JS__" defer></script>
 </body>

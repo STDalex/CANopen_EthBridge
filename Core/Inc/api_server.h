@@ -15,6 +15,7 @@ typedef struct
   uint32_t websocket_batches;
   uint32_t websocket_frames;
   uint32_t websocket_lost_frames;
+  uint32_t websocket_clients;
   bool websocket_active;
   uint32_t download_requests;
   uint32_t download_completed;
