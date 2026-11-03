@@ -76,6 +76,9 @@ _Static_assert((UI_CAPTURE_HISTORY_BYTES + UI_HISTORY_BYTES +
                 UI_SCANNER_SNAPSHOT_BYTES) <=
                UI_SNAPSHOT_REGION_BYTES,
                "UI snapshot buffers exceed their external SDRAM region");
+_Static_assert((UI_SNAPSHOT_BASE + UI_SNAPSHOT_REGION_BYTES) <=
+               WEBSOCKET_TASK_STACK_BASE,
+               "UI snapshot region overlaps WebSocket task stacks");
 
 typedef struct
 {

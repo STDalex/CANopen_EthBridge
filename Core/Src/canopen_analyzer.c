@@ -85,8 +85,9 @@ typedef struct
 #define CANOPEN_ANALYZER_BYTES  (NODE_STATES_BYTES + EVENT_HISTORY_BYTES + \
                                  SDO_OBJECTS_BYTES + SDO_TRANSACTIONS_BYTES)
 
-_Static_assert((CANOPEN_ANALYZER_STATE_BASE + CANOPEN_ANALYZER_BYTES) <= 0xC0800000UL,
-               "CANopen analyzer state exceeds external SDRAM");
+_Static_assert((CANOPEN_ANALYZER_STATE_BASE + CANOPEN_ANALYZER_BYTES) <=
+               UI_SNAPSHOT_BASE,
+               "CANopen analyzer state overlaps UI snapshots");
 
 static CanopenNodeState *const node_states =
   (CanopenNodeState *)CANOPEN_ANALYZER_STATE_BASE;

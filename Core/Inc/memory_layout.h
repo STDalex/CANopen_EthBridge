@@ -23,8 +23,10 @@
 #define API_SNAPSHOT_BASE                    0xC030B000UL
 #define CAN_LOG_LIST_BUFFER_BASE             0xC0313000UL
 #define CANOPEN_ANALYZER_STATE_BASE          0xC0314000UL
-#define UI_SNAPSHOT_BASE                     0xC0324000UL
-#define UI_SNAPSHOT_REGION_BYTES             0x00010000UL
+/* Keep UI snapshots in a separate, explicitly bounded region so analyzer
+   state can never alias the live CAN history. */
+#define UI_SNAPSHOT_BASE                     0xC0328000UL
+#define UI_SNAPSHOT_REGION_BYTES             0x0000C000UL
 #define WEBSOCKET_TASK_STACK_BASE             0xC0334000UL
 #define WEBSOCKET_TASK_STACK_WORDS            2048U
 #define WEBSOCKET_TASK_STACK_COUNT                4U
