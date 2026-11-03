@@ -52,7 +52,7 @@ static volatile uint64_t estimated_busy_time_ns;
 static volatile uint64_t load_window_busy_base;
 static volatile uint32_t load_window_started_tick;
 static volatile uint16_t current_bus_load_permille;
-static volatile uint32_t timestamp_epoch_us;
+static volatile uint64_t timestamp_epoch_us;
 static volatile uint32_t capture_time_high;
 static volatile uint32_t last_valid_tick;
 static volatile uint32_t requested_bitrate;
@@ -79,6 +79,26 @@ static uint64_t ReadEstimatedBusyTimeNs(void)
     __enable_irq();
   }
   return value;
+}
+
+static uint64_t ReadCaptureTimeUs(void)
+{
+  uint32_t primask = __get_PRIMASK();
+  uint32_t high;
+  uint32_t low;
+
+  __disable_irq();
+  high = capture_time_high;
+  low = TIM2->CNT;
+  if ((TIM2->SR & TIM_SR_UIF) != 0U)
+  {
+    ++high;
+  }
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+  return ((uint64_t)high << 32U) | low;
 }
 
 void CanSafety_EmergencyDisableTx(void)
@@ -266,8 +286,8 @@ void CanCapture_Init(void)
   consumer_task = NULL;
   CanSafety_EmergencyDisableTx();
   TimestampTimer_Init();
-  timestamp_epoch_us = TIM2->CNT;
   capture_time_high = 0U;
+  timestamp_epoch_us = ReadCaptureTimeUs();
 }
 
 void CanCapture_SetConsumerTask(void *task_handle)
@@ -317,9 +337,8 @@ void CanCapture_RxIRQHandler(void)
       {
         capture_high += 1U;
       }
-      frame->timestamp_us = capture_time_us - timestamp_epoch_us;
-      frame->capture_time_us = capture_time_us;
-      frame->capture_time_high = capture_high;
+      frame->timestamp_us =
+        ((((uint64_t)capture_high << 32U) | capture_time_us) - timestamp_epoch_us);
       frame->flags = 0U;
       if ((rir & CAN_RI0R_IDE) != 0U)
       {
@@ -466,7 +485,7 @@ void CanCapture_ErrorIRQHandler(void)
     ++error_statistics.unclassified;
   }
   error_statistics.last_error = last_error;
-  error_statistics.last_timestamp_us = TIM2->CNT - timestamp_epoch_us;
+  error_statistics.last_timestamp_us = CanCapture_GetTimestampUs();
   error_statistics.last_esr = esr;
   error_statistics.last_tx_error_counter =
     (uint8_t)((esr & CAN_ESR_TEC) >> CAN_ESR_TEC_Pos);
@@ -605,6 +624,7 @@ const char *CanControl_ErrorName(CanErrorKind error)
 void CanControl_GetStatus(CanCaptureStatus *status)
 {
   uint32_t now;
+  uint32_t primask;
 
   if (status == NULL)
   {
@@ -628,7 +648,13 @@ void CanControl_GetStatus(CanCaptureStatus *status)
   status->received = received_count - received_statistics_base;
   status->ring_overflows = ring_overflow_count - ring_overflow_statistics_base;
   status->gui_overflows = gui_overflow_count - gui_overflow_statistics_base;
+  primask = __get_PRIMASK();
+  __disable_irq();
   status->error_statistics = error_statistics;
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
   status->errors = status->error_statistics.interrupts;
   status->bus_load_permille = current_bus_load_permille;
   status->operating_mode = operating_mode;
@@ -647,9 +673,12 @@ void CanControl_AddGuiOverflow(void)
 
 void CanControl_ResetStatistics(void)
 {
+  uint32_t primask;
   taskENTER_CRITICAL();
   ring_read = ring_write;
-  timestamp_epoch_us = TIM2->CNT;
+  primask = __get_PRIMASK();
+  __disable_irq();
+  timestamp_epoch_us = ReadCaptureTimeUs();
   received_statistics_base = received_count;
   ring_overflow_statistics_base = ring_overflow_count;
   gui_overflow_statistics_base = gui_overflow_count;
@@ -657,35 +686,27 @@ void CanControl_ResetStatistics(void)
   load_window_busy_base = ReadEstimatedBusyTimeNs();
   load_window_started_tick = HAL_GetTick();
   current_bus_load_permille = 0U;
-  taskEXIT_CRITICAL();
-}
-
-uint32_t CanCapture_GetTimestampUs(void)
-{
-  return TIM2->CNT - timestamp_epoch_us;
-}
-
-void CanCapture_GetTimestamps(uint32_t *timestamp_us,
-                              uint32_t *capture_time_us,
-                              uint32_t *capture_time_high_value)
-{
-  uint32_t capture_low;
-  uint32_t capture_high;
-  uint32_t epoch;
-
-  taskENTER_CRITICAL();
-  capture_high = capture_time_high;
-  capture_low = TIM2->CNT;
-  if ((TIM2->SR & TIM_SR_UIF) != 0U)
+  if (primask == 0U)
   {
-    ++capture_high;
+    __enable_irq();
   }
-  epoch = timestamp_epoch_us;
   taskEXIT_CRITICAL();
+}
 
-  if (timestamp_us != NULL) *timestamp_us = capture_low - epoch;
-  if (capture_time_us != NULL) *capture_time_us = capture_low;
-  if (capture_time_high_value != NULL) *capture_time_high_value = capture_high;
+uint64_t CanCapture_GetTimestampUs(void)
+{
+  uint64_t capture_time;
+  uint64_t epoch;
+  uint32_t primask = __get_PRIMASK();
+
+  __disable_irq();
+  capture_time = ReadCaptureTimeUs();
+  epoch = timestamp_epoch_us;
+  if (primask == 0U)
+  {
+    __enable_irq();
+  }
+  return capture_time - epoch;
 }
 
 void CanControl_Task(void)

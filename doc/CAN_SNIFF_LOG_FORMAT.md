@@ -1,12 +1,15 @@
-# CanSniff Log format (`.CSL`) version 1.0
+# CanSniff Log format (`.CSL`) version 1.1
 
 ## Purpose and byte order
 
 `.CSL` is the canonical lossless Classic CAN capture produced by the device.
 All multi-byte integers are unsigned little-endian. Timestamps are expressed in
-microseconds relative to the beginning of a logging configuration. A file is a
-128-byte header followed by CRC-protected blocks and, after a clean close or
-recovery, a 64-byte footer.
+microseconds on the device-wide 64-bit timebase. The timebase starts at system
+startup and returns to zero when statistics are reset; starting or stopping SD
+logging does not change it. A reset during active logging closes the current
+session before frames from the new timebase are stored. A file is a 128-byte
+header followed by CRC-protected blocks and, after a clean close or recovery, a
+64-byte footer.
 
 The device writes an active file with the `.TMP` extension. It truncates the
 unused preallocated tail, appends a footer, calls `f_sync`, closes the file and
@@ -18,7 +21,7 @@ renames it to `.CSL`. Files rotate before 32 MiB and never split a block.
 |---:|---:|---|
 | 0 | 4 | ASCII magic `CSLG` |
 | 4 | 2 | format major version, currently `1` |
-| 6 | 2 | format minor version, currently `0` |
+| 6 | 2 | format minor version, currently `1` |
 | 8 | 2 | header size, `128` |
 | 10 | 2 | format flags; bit 0 means little-endian |
 | 12 | 4 | CAN bitrate in bit/s, or zero while auto detection is unresolved |

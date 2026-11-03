@@ -891,9 +891,7 @@ static size_t WebSocketBuildBatch(uint8_t *payload, const CanFrameRecord *frames
     const CanFrameRecord *frame = &frames[index];
     uint8_t *record = payload + WEBSOCKET_BATCH_HEADER_BYTES +
                       (index * WEBSOCKET_FRAME_BYTES);
-    uint64_t timestamp = ((uint64_t)frame->capture_time_high << 32) |
-                         frame->capture_time_us;
-    StoreLe64(record, timestamp);
+    StoreLe64(record, frame->timestamp_us);
     StoreLe32(record + 8U, frame->id);
     record[12] = frame->flags;
     record[13] = frame->dlc;
@@ -1206,13 +1204,13 @@ static bool BridgeSendResult(struct netconn *connection,
   raw[16] = '\0';
   length = snprintf(text, sizeof(text),
     "{\"type\":\"result\",\"request_id\":%lu,\"tx_sequence\":%lu,"
-    "\"status\":\"%s\",\"timestamp_us\":%lu,\"capture_time_us\":%llu,"
+    "\"status\":\"%s\",\"timestamp_us\":%llu,\"capture_time_us\":%llu,"
     "\"abort_code\":%lu,"
     "\"has_response\":%s,\"can_id\":%lu,\"dlc\":%u,\"data\":\"%s\"}",
     (unsigned long)result->client_request_id,
     (unsigned long)result->tx_sequence,
     CanBridge_ResultName(result->code),
-    (unsigned long)result->timestamp_us,
+    (unsigned long long)result->timestamp_us,
     (unsigned long long)result->capture_time_us,
     (unsigned long)result->abort_code,
     result->has_response ? "true" : "false",
@@ -1804,9 +1802,9 @@ static void WriteTxResponse(JsonWriter *writer, const CanTxHistoryEntry *entry)
                entry->has_response ? "true" : "false");
   if (!entry->has_response) return;
   WriterPrintf(writer,
-               ",\"response\":{\"timestamp_us\":%lu,\"response_time_us\":%lu,"
+               ",\"response\":{\"timestamp_us\":%llu,\"response_time_us\":%lu,"
                "\"can_id\":%lu,\"dlc\":%u,\"raw\":[",
-               (unsigned long)entry->response.timestamp_us,
+               (unsigned long long)entry->response.timestamp_us,
                (unsigned long)entry->response_time_us,
                (unsigned long)entry->response.id,
                (unsigned int)entry->response.dlc);
@@ -2527,10 +2525,11 @@ static void HandleCanTxHistory(struct netconn *connection)
   for (index = 0U; index < count; ++index)
   {
     CanTxHistoryEntry *entry = &tx_history_snapshot[index];
-    WriterPrintf(&writer, "%s{\"sequence\":%lu,\"timestamp_us\":%lu,"
+    WriterPrintf(&writer, "%s{\"sequence\":%lu,\"timestamp_us\":%llu,"
                  "\"result\":\"%s\",\"periodic\":%s,"
                  "\"attempt_count\":%lu,", index == 0U ? "" : ",",
-                 (unsigned long)entry->sequence, (unsigned long)entry->timestamp_us,
+                 (unsigned long)entry->sequence,
+                 (unsigned long long)entry->timestamp_us,
                  CanTx_ResultName(entry->result),
                  entry->periodic ? "true" : "false",
                  (unsigned long)entry->attempt_count);
@@ -2730,16 +2729,16 @@ static void HandleNodes(struct netconn *connection, const char *query)
   WriterBegin(&writer, connection, "200 OK");
   WriterPrintf(&writer,
                "{\"total\":%lu,\"offset\":%lu,\"analyzer_frames\":%lu,"
-               "\"snapshot_us\":%lu,\"items\":[",
+               "\"snapshot_us\":%llu,\"items\":[",
                (unsigned long)count, (unsigned long)offset,
                (unsigned long)global.frame_count,
-               (unsigned long)global.last_timestamp_us);
+               (unsigned long long)global.last_timestamp_us);
   for (index = offset; index < end; ++index)
   {
     const CanopenNodeSnapshot *node = &node_snapshot[index];
     WriterPrintf(&writer,
-      "%s{\"node_id\":%u,\"last_type\":\"%s\",\"first_seen_us\":%lu,"
-      "\"last_seen_us\":%lu,\"frames\":%lu,\"bytes\":%lu,"
+      "%s{\"node_id\":%u,\"last_type\":\"%s\",\"first_seen_us\":%llu,"
+      "\"last_seen_us\":%llu,\"frames\":%lu,\"bytes\":%lu,"
       "\"sdo_requests\":%lu,\"sdo_responses\":%lu,\"sdo_started\":%lu,"
       "\"sdo_completed\":%lu,\"sdo_aborted\":%lu,\"sdo_timeouts\":%lu,"
       "\"sdo_conflicts\":%lu,\"sdo_orphans\":%lu,"
@@ -2747,7 +2746,8 @@ static void HandleNodes(struct netconn *connection, const char *query)
       "\"has_nmt_state\":%s,\"nmt_state\":\"%s\",\"nmt_state_code\":%u}",
       index == offset ? "" : ",", (unsigned int)node->node_id,
       CanopenDecoder_TypeName(node->last_type),
-      (unsigned long)node->first_seen_us, (unsigned long)node->last_seen_us,
+      (unsigned long long)node->first_seen_us,
+      (unsigned long long)node->last_seen_us,
       (unsigned long)node->frame_count, (unsigned long)node->byte_count,
       (unsigned long)node->sdo_request_count, (unsigned long)node->sdo_response_count,
       (unsigned long)node->sdo_started_count,
@@ -2788,7 +2788,7 @@ static void HandleStatistics(struct netconn *connection)
     "\"passive\":%lu,\"bus_off\":%lu,\"stuff\":%lu,\"form\":%lu,"
     "\"ack\":%lu,\"bit_recessive\":%lu,\"bit_dominant\":%lu,"
     "\"crc\":%lu,\"unclassified\":%lu},"
-    "\"last_error\":{\"type\":\"%s\",\"timestamp_us\":%lu,"
+    "\"last_error\":{\"type\":\"%s\",\"timestamp_us\":%llu,"
     "\"esr\":%lu,\"tx_error_counter\":%u,\"rx_error_counter\":%u}},",
     (unsigned long)capture.received, (unsigned long)capture.ring_overflows,
     (unsigned long)capture.gui_overflows, (unsigned long)capture.errors,
@@ -2805,7 +2805,7 @@ static void HandleStatistics(struct netconn *connection)
     (unsigned long)capture.error_statistics.crc,
     (unsigned long)capture.error_statistics.unclassified,
     CanControl_ErrorName(capture.error_statistics.last_error),
-    (unsigned long)capture.error_statistics.last_timestamp_us,
+    (unsigned long long)capture.error_statistics.last_timestamp_us,
     (unsigned long)capture.error_statistics.last_esr,
     (unsigned int)capture.error_statistics.last_tx_error_counter,
     (unsigned int)capture.error_statistics.last_rx_error_counter);
@@ -2903,10 +2903,10 @@ static void HandleFrames(struct netconn *connection, const char *query)
     const CanFrameRecord *frame = &frame_snapshot[index];
     uint32_t byte;
     WriterPrintf(&writer,
-      "%s{\"timestamp_us\":%lu,\"capture_time_us\":%llu,\"id\":%lu,"
+      "%s{\"timestamp_us\":%llu,\"capture_time_us\":%llu,\"id\":%lu,"
       "\"extended\":%s,\"remote\":%s,\"local_tx\":%s,\"dlc\":%u,\"data\":\"",
-      index == offset ? "" : ",", (unsigned long)frame->timestamp_us,
-      (unsigned long long)(((uint64_t)frame->capture_time_high << 32) | frame->capture_time_us),
+      index == offset ? "" : ",", (unsigned long long)frame->timestamp_us,
+      (unsigned long long)frame->timestamp_us,
       (unsigned long)frame->id,
       (frame->flags & CAN_FRAME_FLAG_EXTENDED) != 0U ? "true" : "false",
       (frame->flags & CAN_FRAME_FLAG_REMOTE) != 0U ? "true" : "false",
@@ -2942,7 +2942,7 @@ static void HandleNodeEvents(struct netconn *connection, uint8_t node_id,
     const CanopenNodeEventSnapshot *event = &event_snapshot[index];
     uint32_t byte;
     WriterPrintf(&writer,
-      "%s{\"timestamp_us\":%lu,\"id\":%lu,\"type\":\"%s\","
+      "%s{\"timestamp_us\":%llu,\"id\":%lu,\"type\":\"%s\","
       "\"sdo_status\":\"%s\",\"index\":%u,\"subindex\":%u,"
       "\"response_time_us\":%lu,\"transaction_time_us\":%lu,"
       "\"transferred_bytes\":%lu,\"abort_code\":%lu,"
@@ -2950,7 +2950,7 @@ static void HandleNodeEvents(struct netconn *connection, uint8_t node_id,
       "\"local_transaction\":%s,\"dlc\":%u,"
       "\"has_response_time\":%s,\"has_sdo_address\":%s,"
       "\"data_offset\":%u,\"data\":\"",
-      index == begin ? "" : ",", (unsigned long)event->frame.timestamp_us,
+      index == begin ? "" : ",", (unsigned long long)event->frame.timestamp_us,
       (unsigned long)event->frame.id, CanopenDecoder_TypeName(event->type),
       SdoStatusName(event->sdo_status), (unsigned int)event->object_index,
       (unsigned int)event->object_subindex, (unsigned long)event->response_time_us,

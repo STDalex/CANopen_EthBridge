@@ -110,6 +110,7 @@ void CanPipeline_ResetStatistics(void)
   taskENTER_CRITICAL();
   (void)xQueueReset(analyzerFrameQueue);
   Ui_ResetFrameHistory();
+  CanLogger_ResetTimebase();
   CanControl_ResetStatistics();
   CanopenAnalyzer_Reset();
   CanLogger_ResetCounters();

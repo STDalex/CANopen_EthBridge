@@ -54,9 +54,9 @@ typedef struct
   SdoTransferDirection direction;
   SdoTransferMode mode;
   SdoTransferPhase phase;
-  uint32_t started_us;
-  uint32_t last_activity_us;
-  uint32_t last_request_us;
+  uint64_t started_us;
+  uint64_t last_activity_us;
+  uint64_t last_request_us;
   uint32_t transferred_bytes;
   uint16_t segment_count;
 } CanopenSdoTransaction;
@@ -160,7 +160,7 @@ static void Update_Object(uint8_t node_id, uint16_t index, uint8_t subindex,
 }
 
 static void Mark_TransactionObjects(uint8_t node_id, const CanopenSdoTransaction *transaction,
-                                    CanopenSdoStatus status, uint32_t finished_us,
+                                    CanopenSdoStatus status, uint64_t finished_us,
                                     uint32_t abort_code)
 {
   uint32_t object_index;
@@ -175,7 +175,8 @@ static void Mark_TransactionObjects(uint8_t node_id, const CanopenSdoTransaction
     {
       object->snapshot.sdo_status = status;
       object->snapshot.sdo_confidence = confidence;
-      object->snapshot.transaction_time_us = finished_us - transaction->started_us;
+      object->snapshot.transaction_time_us =
+        (uint32_t)(finished_us - transaction->started_us);
       object->snapshot.transferred_bytes = transaction->transferred_bytes;
       object->snapshot.abort_code = abort_code;
       object->snapshot.segment_count = transaction->segment_count;
@@ -185,7 +186,7 @@ static void Mark_TransactionObjects(uint8_t node_id, const CanopenSdoTransaction
 }
 
 static void Finish_Transaction(uint8_t node_id, CanopenSdoStatus status,
-                               uint32_t finished_us, uint32_t abort_code,
+                               uint64_t finished_us, uint32_t abort_code,
                                SdoFrameResult *result)
 {
   CanopenSdoTransaction *transaction = &sdo_transactions[node_id - 1U];
@@ -210,7 +211,8 @@ static void Finish_Transaction(uint8_t node_id, CanopenSdoStatus status,
   {
     result->status = status;
     result->confidence = confidence;
-    result->transaction_time_us = finished_us - transaction->started_us;
+    result->transaction_time_us =
+      (uint32_t)(finished_us - transaction->started_us);
     result->transferred_bytes = transaction->transferred_bytes;
     result->abort_code = abort_code;
     result->segment_count = transaction->segment_count;
@@ -416,7 +418,8 @@ static void Process_ServerSdo(uint8_t node_id, const CanFrameRecord *frame,
     if (transaction->active && address->valid &&
         (transaction->index == address->index) && (transaction->subindex == address->subindex))
     {
-      result->response_time_us = frame->timestamp_us - transaction->last_request_us;
+      result->response_time_us =
+        (uint32_t)(frame->timestamp_us - transaction->last_request_us);
       result->has_response_time = true;
       Finish_Transaction(node_id, CANOPEN_SDO_STATUS_ABORTED,
                          frame->timestamp_us, abort_code, result);
@@ -452,7 +455,8 @@ static void Process_ServerSdo(uint8_t node_id, const CanFrameRecord *frame,
   }
   transaction->last_activity_us = frame->timestamp_us;
   Set_ResultFromTransaction(result, transaction);
-  result->response_time_us = frame->timestamp_us - transaction->last_request_us;
+  result->response_time_us =
+    (uint32_t)(frame->timestamp_us - transaction->last_request_us);
   result->has_response_time = true;
   result->data_offset = address->valid ? address->data_offset : 1U;
   if (transaction->mode == SDO_MODE_BLOCK)
@@ -617,7 +621,7 @@ void CanopenAnalyzer_ProcessFrame(const CanFrameRecord *frame)
   taskEXIT_CRITICAL();
 }
 
-void CanopenAnalyzer_Update(uint32_t now_us)
+void CanopenAnalyzer_Update(uint64_t now_us)
 {
   uint32_t node_index;
   taskENTER_CRITICAL();
@@ -625,7 +629,7 @@ void CanopenAnalyzer_Update(uint32_t now_us)
   {
     CanopenSdoTransaction *transaction = &sdo_transactions[node_index];
     if (transaction->active &&
-        ((uint32_t)(now_us - transaction->started_us) >= CANOPEN_SDO_TIMEOUT_US))
+        ((now_us - transaction->started_us) >= CANOPEN_SDO_TIMEOUT_US))
       Finish_Transaction((uint8_t)(node_index + 1U), CANOPEN_SDO_STATUS_TIMEOUT,
                          now_us, 0U, NULL);
   }

@@ -13,9 +13,7 @@
 
 typedef struct
 {
-  uint32_t timestamp_us;
-  uint32_t capture_time_us;
-  uint32_t capture_time_high;
+  uint64_t timestamp_us;
   uint32_t id;
   uint8_t dlc;
   uint8_t flags;
@@ -73,7 +71,7 @@ typedef struct
   uint32_t bit_dominant;
   uint32_t crc;
   uint32_t unclassified;
-  uint32_t last_timestamp_us;
+  uint64_t last_timestamp_us;
   uint32_t last_esr;
   uint8_t last_tx_error_counter;
   uint8_t last_rx_error_counter;
@@ -119,9 +117,6 @@ const char *CanControl_ErrorName(CanErrorKind error);
 void CanControl_GetStatus(CanCaptureStatus *status);
 void CanControl_AddGuiOverflow(void);
 void CanControl_ResetStatistics(void);
-uint32_t CanCapture_GetTimestampUs(void);
-void CanCapture_GetTimestamps(uint32_t *timestamp_us,
-                              uint32_t *capture_time_us,
-                              uint32_t *capture_time_high_value);
+uint64_t CanCapture_GetTimestampUs(void);
 
 #endif

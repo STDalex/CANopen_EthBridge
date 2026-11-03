@@ -1442,14 +1442,22 @@ static void Set_DisplayPaused(bool paused)
   rows_dirty = true;
 }
 
+static void Format_DisplayTimestamp(char *text, size_t capacity,
+                                    uint64_t timestamp_us)
+{
+  uint64_t seconds = (timestamp_us / 1000000ULL) % 100000ULL;
+  uint64_t fraction = (timestamp_us / 10ULL) % 100000ULL;
+  (void)snprintf(text, capacity, "%05llu.%05llu",
+                 (unsigned long long)seconds,
+                 (unsigned long long)fraction);
+}
+
 static void Format_Row(UiRowText *text, const CanFrameRecord *frame)
 {
   uint32_t i;
   uint32_t offset = 0U;
 
-  (void)snprintf(text->time, sizeof(text->time), "%5lu.%05lu",
-                 (unsigned long)(frame->timestamp_us / 1000000U),
-                 (unsigned long)((frame->timestamp_us / 10U) % 100000U));
+  Format_DisplayTimestamp(text->time, sizeof(text->time), frame->timestamp_us);
   (void)snprintf(text->id, sizeof(text->id),
                  ((frame->flags & CAN_FRAME_FLAG_EXTENDED) != 0U) ? "%08lX" : "%03lX",
                  (unsigned long)frame->id);
@@ -1817,9 +1825,8 @@ static void Format_NodeRow(UiNodeRowText *text, const CanopenNodeSnapshot *node)
   }
   (void)snprintf(text->node_id, sizeof(text->node_id), "%c%u",
                  CanLogger_IsNodeSelected(node->node_id) ? '*' : ' ', node->node_id);
-  (void)snprintf(text->last_seen, sizeof(text->last_seen), "%5lu.%05lu",
-                 (unsigned long)(node->last_seen_us / 1000000U),
-                 (unsigned long)((node->last_seen_us / 10U) % 100000U));
+  Format_DisplayTimestamp(text->last_seen, sizeof(text->last_seen),
+                          node->last_seen_us);
   (void)snprintf(text->frames, sizeof(text->frames), "%lu", (unsigned long)node->frame_count);
   (void)snprintf(text->traffic, sizeof(text->traffic), "%lu.%lu%%",
                  (unsigned long)(traffic_permille / 10U),
@@ -2182,9 +2189,8 @@ static void Format_EventRow(UiEventRowText *text, const CanopenNodeEventSnapshot
     address.valid = true;
   }
 
-  (void)snprintf(text->time, sizeof(text->time), "%5lu.%05lu",
-                 (unsigned long)(event->frame.timestamp_us / 1000000U),
-                 (unsigned long)((event->frame.timestamp_us / 10U) % 100000U));
+  Format_DisplayTimestamp(text->time, sizeof(text->time),
+                          event->frame.timestamp_us);
   text->latency[0] = '\0';
   if (event->has_response_time)
   {

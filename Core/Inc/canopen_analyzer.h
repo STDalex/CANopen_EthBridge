@@ -33,8 +33,8 @@ typedef struct
 {
   uint8_t node_id;
   CanopenMessageType last_type;
-  uint32_t first_seen_us;
-  uint32_t last_seen_us;
+  uint64_t first_seen_us;
+  uint64_t last_seen_us;
   uint32_t frame_count;
   uint32_t byte_count;
   uint32_t sdo_request_count;
@@ -53,7 +53,7 @@ typedef struct
 typedef struct
 {
   uint32_t frame_count;
-  uint32_t last_timestamp_us;
+  uint64_t last_timestamp_us;
   uint32_t unique_node_count;
 } CanopenGlobalSnapshot;
 
@@ -78,7 +78,7 @@ typedef struct
 
 void CanopenAnalyzer_Init(void);
 void CanopenAnalyzer_ProcessFrame(const CanFrameRecord *frame);
-void CanopenAnalyzer_Update(uint32_t now_us);
+void CanopenAnalyzer_Update(uint64_t now_us);
 void CanopenAnalyzer_AddQueueOverflow(void);
 uint32_t CanopenAnalyzer_GetNodesSnapshot(CanopenNodeSnapshot *nodes, uint32_t capacity,
                                           CanopenGlobalSnapshot *global);

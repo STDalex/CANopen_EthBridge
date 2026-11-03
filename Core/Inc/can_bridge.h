@@ -59,7 +59,7 @@ typedef struct
   uint32_t session_id;
   uint32_t client_request_id;
   uint32_t tx_sequence;
-  uint32_t timestamp_us;
+  uint64_t timestamp_us;
   uint64_t capture_time_us;
   uint32_t abort_code;
   CanBridgeResultCode code;

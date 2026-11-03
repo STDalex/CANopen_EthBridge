@@ -39,7 +39,7 @@ typedef struct
   CanTxSdoRequest request;
   CanFrameRecord response;
   uint32_t sequence;
-  uint32_t request_timestamp_us;
+  uint64_t request_timestamp_us;
   uint32_t response_time_us;
   bool used;
   bool waiting;
@@ -148,13 +148,13 @@ static void ApplyResponseLocked(uint32_t sequence,
 }
 
 static void ArmResponseCorrelation(const CanTxQueueEntry *entry,
-                                   uint32_t request_timestamp_us)
+                                   uint64_t request_timestamp_us)
 {
   CanTxSdoRequest request;
   CanTxResponseCorrelation *slot = NULL;
   CanTxResponseCorrelation *oldest = NULL;
   uint32_t index;
-  uint32_t oldest_age = 0U;
+  uint64_t oldest_age = 0U;
   if ((entry == NULL) || !CanTx_DecodeSdoRequest(&entry->frame, &request)) return;
 
   taskENTER_CRITICAL();
@@ -162,7 +162,7 @@ static void ArmResponseCorrelation(const CanTxQueueEntry *entry,
   for (index = 0U; (slot == NULL) && (index < CAN_TX_QUEUE_CAPACITY); ++index)
   {
     CanTxResponseCorrelation *candidate = &response_correlations[index];
-    uint32_t age = request_timestamp_us - candidate->request_timestamp_us;
+    uint64_t age = request_timestamp_us - candidate->request_timestamp_us;
     if (!candidate->used ||
         (candidate->waiting &&
          (age > ((uint32_t)candidate->request.timeout_ms * 1000U))))
@@ -284,9 +284,7 @@ static CanTxResult Transmit(const CanTxQueueEntry *entry)
     return CAN_TX_RESULT_DRIVER_ERROR;
   }
 
-  CanCapture_GetTimestamps(&local_frame.timestamp_us,
-                           &local_frame.capture_time_us,
-                           &local_frame.capture_time_high);
+  local_frame.timestamp_us = CanCapture_GetTimestampUs();
   local_frame.id = entry->frame.id;
   local_frame.dlc = entry->frame.dlc;
   local_frame.flags = CAN_FRAME_FLAG_LOCAL_TX;
@@ -809,7 +807,7 @@ void CanTx_ObserveRxFrame(const CanFrameRecord *frame)
   for (index = 0U; index < CAN_TX_QUEUE_CAPACITY; ++index)
   {
     CanTxResponseCorrelation *candidate = &response_correlations[index];
-    uint32_t elapsed;
+    uint64_t elapsed;
     if (!candidate->used || !candidate->waiting ||
         (candidate->request.node_id != node_id) ||
         (candidate->request.index != object_index) ||
@@ -818,14 +816,14 @@ void CanTx_ObserveRxFrame(const CanFrameRecord *frame)
     elapsed = frame->timestamp_us - candidate->request_timestamp_us;
     if (elapsed > ((uint32_t)candidate->request.timeout_ms * 1000U)) continue;
     if ((match == NULL) ||
-        ((int32_t)(candidate->request_timestamp_us -
-                   match->request_timestamp_us) > 0))
+        (candidate->request_timestamp_us > match->request_timestamp_us))
       match = candidate;
   }
   if (match != NULL)
   {
     match->response = *frame;
-    match->response_time_us = frame->timestamp_us - match->request_timestamp_us;
+    match->response_time_us =
+      (uint32_t)(frame->timestamp_us - match->request_timestamp_us);
     match->has_response = true;
     match->waiting = false;
     ApplyResponseLocked(match->sequence, match);

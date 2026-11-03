@@ -105,6 +105,7 @@ bool CanLogger_DownloadRead(CanLogDownload *download, uint32_t requested,
                             uint32_t timeout_ms);
 void CanLogger_DownloadEnd(CanLogDownload *download, uint32_t timeout_ms);
 void CanLogger_ResetCounters(void);
+void CanLogger_ResetTimebase(void);
 
 const char *CanLogger_ModeName(CanLogMode mode);
 const char *CanLogger_CardStateName(CanLogCardState state);

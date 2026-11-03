@@ -90,8 +90,6 @@ static void FinishLocked(CanBridgeNodeState *node,
                          uint32_t abort_code)
 {
   CanBridgeResult *result;
-  uint32_t capture_low;
-  uint32_t capture_high;
 
   if ((node == NULL) || !node->pending) return;
   node->pending = false;
@@ -114,14 +112,12 @@ static void FinishLocked(CanBridgeNodeState *node,
   if (response != NULL)
   {
     result->timestamp_us = response->timestamp_us;
-    result->capture_time_us = ((uint64_t)response->capture_time_high << 32U) |
-                              response->capture_time_us;
+    result->capture_time_us = response->timestamp_us;
   }
   else
   {
-    CanCapture_GetTimestamps(&result->timestamp_us,
-                             &capture_low, &capture_high);
-    result->capture_time_us = ((uint64_t)capture_high << 32U) | capture_low;
+    result->timestamp_us = CanCapture_GetTimestampUs();
+    result->capture_time_us = result->timestamp_us;
   }
   result->abort_code = abort_code;
   result->code = code;

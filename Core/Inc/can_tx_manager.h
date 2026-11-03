@@ -80,7 +80,7 @@ typedef enum
 typedef struct
 {
   uint32_t sequence;
-  uint32_t timestamp_us;
+  uint64_t timestamp_us;
   CanTxFrame frame;
   CanFrameRecord response;
   uint32_t response_time_us;

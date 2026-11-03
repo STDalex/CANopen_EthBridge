@@ -20,6 +20,7 @@ def crc32(data: bytes) -> int:
 
 
 def make_capture(path: Path, corrupt_payload: bool = False) -> None:
+    month_timestamp_us = 30 * 24 * 60 * 60 * 1_000_000
     header = bytearray(128)
     header[:4] = b"CSLG"
     struct.pack_into("<HHHHI", header, 4, 1, 0, 128, 1, 500_000)
@@ -40,7 +41,9 @@ def make_capture(path: Path, corrupt_payload: bool = False) -> None:
 
     block = bytearray(32)
     block[:4] = b"BLK1"
-    struct.pack_into("<IQIII", block, 4, 3, 1_000_000, 2, len(payload), payload_crc)
+    struct.pack_into(
+        "<IQIII", block, 4, 3, month_timestamp_us, 2, len(payload), payload_crc
+    )
     struct.pack_into("<I", block, 28, crc32(block[:28]))
 
     footer = bytearray(64)
@@ -61,7 +64,8 @@ class ConverterTests(unittest.TestCase):
             self.assertEqual(header.bitrate, 500_000)
             self.assertEqual(header.session_id, 7)
             self.assertEqual(len(decoded), 2)
-            self.assertEqual(decoded[0].timestamp_us, 1_000_000)
+            self.assertEqual(decoded[0].timestamp_us, 2_592_000_000_000)
+            self.assertEqual(decoded[1].timestamp_us, 2_592_000_000_025)
             self.assertEqual(decoded[0].can_id, 0x181)
             self.assertEqual(decoded[0].data, bytes.fromhex("1122"))
             self.assertEqual(converter.canopen_decode(decoded[0]), (1, "TPDO1"))

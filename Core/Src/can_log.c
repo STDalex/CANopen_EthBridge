@@ -14,7 +14,7 @@
 #include <string.h>
 
 #define CAN_LOG_FORMAT_MAJOR          1U
-#define CAN_LOG_FORMAT_MINOR          0U
+#define CAN_LOG_FORMAT_MINOR          1U
 #define CAN_LOG_FILE_HEADER_SIZE      128U
 #define CAN_LOG_BLOCK_HEADER_SIZE     32U
 #define CAN_LOG_FOOTER_SIZE           64U
@@ -143,8 +143,6 @@ static uint8_t producer_block;
 static CanLogMode producer_mode;
 static uint32_t producer_generation;
 static uint8_t producer_node_filter[16];
-static uint64_t producer_session_origin;
-static bool producer_session_origin_valid;
 
 static FATFS storage_fs;
 static FIL storage_file;
@@ -397,7 +395,6 @@ void CanLogger_Init(void)
   producer_block = CAN_LOG_INVALID_BLOCK;
   producer_mode = CAN_LOG_MODE_OFF;
   producer_generation = 0U;
-  producer_session_origin_valid = false;
   request_sequence = 0U;
   response_sequence = 0U;
   response_count = 0U;
@@ -609,7 +606,6 @@ void CanLogger_ProducerPoll(void)
       producer_generation = requested.generation;
       memcpy(producer_node_filter, requested.node_filter,
              sizeof(producer_node_filter));
-      producer_session_origin_valid = false;
     }
   }
 
@@ -632,15 +628,12 @@ void CanLogger_SubmitFrame(const CanFrameRecord *frame)
   uint8_t data_length;
   uint32_t record_length;
   uint32_t id_flags;
-  uint64_t capture_time;
   uint64_t timestamp;
 
   if (frame == NULL)
   {
     return;
   }
-  capture_time = ((uint64_t)frame->capture_time_high << 32) |
-                 frame->capture_time_us;
   CanLogger_ProducerPoll();
 
   if (producer_mode == CAN_LOG_MODE_OFF)
@@ -662,12 +655,7 @@ void CanLogger_SubmitFrame(const CanFrameRecord *frame)
     }
   }
 
-  if (!producer_session_origin_valid)
-  {
-    producer_session_origin = capture_time;
-    producer_session_origin_valid = true;
-  }
-  timestamp = capture_time - producer_session_origin;
+  timestamp = frame->timestamp_us;
   data_length = ((frame->flags & CAN_FRAME_FLAG_REMOTE) != 0U) ? 0U : frame->dlc;
   if (data_length > 8U)
   {
@@ -834,6 +822,19 @@ void CanLogger_ResetCounters(void)
   {
     StorageSd_ResetDiagnostics();
   }
+}
+
+void CanLogger_ResetTimebase(void)
+{
+  taskENTER_CRITICAL();
+  if (requested_mode != CAN_LOG_MODE_OFF)
+  {
+    /* Force the producer to close the current session before it accepts a
+       frame from the newly reset common timebase. */
+    ++requested_generation;
+    producer_mode = CAN_LOG_MODE_OFF;
+  }
+  taskEXIT_CRITICAL();
 }
 
 const char *CanLogger_ModeName(CanLogMode mode)
